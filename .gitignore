@@ -1,0 +1,13 @@
+.vscode/
+
+opencv*
+
+screenshots/
+templates/
+
+build.ps1
+config.ini
+
+*.code-workspace
+*.exe
+*.lua
