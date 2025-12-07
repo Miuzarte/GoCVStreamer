@@ -1,25 +1,25 @@
-package main
+package fps
 
 import (
 	"time"
 )
 
-type fpsState struct {
+type state struct {
 	fps        float64
 	frameCount int
 	lastTime   time.Time
 }
 
-type FpsCounter struct {
-	*fpsState
+type counter struct {
+	*state
 	UpdateInterval time.Duration
 }
 
-func NewFpsCounter(updateInterval time.Duration) FpsCounter {
-	return FpsCounter{fpsState: &fpsState{}, UpdateInterval: updateInterval}
+func NewCounter(updateInterval time.Duration) counter {
+	return counter{state: &state{}, UpdateInterval: updateInterval}
 }
 
-func (fc *FpsCounter) update() {
+func (fc *counter) update() {
 	fc.frameCount++
 	now := time.Now()
 	elapsed := now.Sub(fc.lastTime)
@@ -31,7 +31,7 @@ func (fc *FpsCounter) update() {
 	}
 }
 
-func (fc *FpsCounter) Count() float64 {
+func (fc *counter) Count() float64 {
 	fc.update()
 	return fc.fps
 }

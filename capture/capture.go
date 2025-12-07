@@ -16,7 +16,7 @@ import (
 
 var log = SimpleLog.New("[Capture]", true, false)
 
-type Screenshooter struct {
+type Capturer struct {
 	FramesElapsed int
 
 	displayIndex int
@@ -27,17 +27,17 @@ type Screenshooter struct {
 	mu           sync.Mutex
 }
 
-func New(displayIndex int) (ss *Screenshooter, err error) {
+func New(displayIndex int) (ss *Capturer, err error) {
 	max := screenshot.NumActiveDisplays()
 	if displayIndex >= max {
 		return nil, fmt.Errorf("device index [%d] out of bounds: %d", displayIndex, max)
 	}
 
-	ss = &Screenshooter{displayIndex: displayIndex}
+	ss = &Capturer{displayIndex: displayIndex}
 	return ss, ss.new()
 }
 
-func (ss *Screenshooter) new() (err error) {
+func (ss *Capturer) new() (err error) {
 	ss.Close()
 
 	// Make thread PerMonitorV2 Dpi aware if supported on OS
@@ -54,23 +54,23 @@ func (ss *Screenshooter) new() (err error) {
 	// Setup D3D11 stuff
 	ss.device, ss.deviceCtx, err = d3d11.NewD3D11Device()
 	if err != nil {
-		return fmt.Errorf("could not create D3D11 Device: %w\n", err)
+		return fmt.Errorf("could not create D3D11 Device: %w", err)
 	}
 
 	ss.ddup, err = outputduplication.NewIDXGIOutputDuplication(ss.device, ss.deviceCtx, uint(ss.displayIndex))
 	if err != nil {
-		return fmt.Errorf("err NewIDXGIOutputDuplication: %w\n", err)
+		return fmt.Errorf("err NewIDXGIOutputDuplication: %w", err)
 	}
 
 	ss.screenBounds, err = ss.ddup.GetBounds()
 	if err != nil {
-		return fmt.Errorf("unable to obtain output bounds: %w\n", err)
+		return fmt.Errorf("unable to obtain output bounds: %w", err)
 	}
 
 	return nil
 }
 
-func (ss *Screenshooter) Close() {
+func (ss *Capturer) Close() {
 	if ss.ddup != nil {
 		ss.ddup.Release()
 	}
@@ -82,7 +82,7 @@ func (ss *Screenshooter) Close() {
 	}
 }
 
-func (ss *Screenshooter) Bounds() image.Rectangle {
+func (ss *Capturer) Bounds() image.Rectangle {
 	return ss.screenBounds
 }
 
@@ -90,13 +90,13 @@ func (ss *Screenshooter) Bounds() image.Rectangle {
 //
 //	runtime.LockOSThread()
 //	defer runtime.UnlockOSThread()
-func (ss *Screenshooter) GetImage(img *image.RGBA) error {
+func (ss *Capturer) GetImage(img *image.RGBA) error {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
 	return ss.getImage(img)
 }
 
-func (ss *Screenshooter) getImage(img *image.RGBA) error {
+func (ss *Capturer) getImage(img *image.RGBA) error {
 	err := ss.ddup.GetImage(img, 0)
 	if err == nil {
 		ss.FramesElapsed++

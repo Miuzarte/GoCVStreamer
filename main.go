@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/Miuzarte/GoCVStreamer/capture"
+	"github.com/Miuzarte/GoCVStreamer/fps"
+	"github.com/Miuzarte/GoCVStreamer/template"
 
 	"github.com/Miuzarte/SimpleLog"
 	"github.com/kbinani/screenshot"
@@ -25,12 +27,16 @@ import (
 )
 
 const (
+	debug   = false
+	drawNeg = false
+)
+
+const (
 	KEY_ESC = 27
 )
 
 const (
-	debug   = false
-	drawNeg = false
+	templatesDir = "templates"
 )
 
 var log = SimpleLog.New("[Streamer]", true, false).SetLevel(SimpleLog.DebugLevel)
@@ -56,24 +62,28 @@ const (
 )
 
 var (
-	process       windows.HWND
-	windowName    = strings.TrimSuffix(filepath.Base(os.Args[0]), ".exe")
-	displayIndex  = 0 // [TODO]
-	screenshooter *capture.Screenshooter
-	screenImage   *image.RGBA
-	roiRect       = image.Rect(1986+8, 1197+8, 2114-16, 1306-8)
+	parentProcessId = os.Getppid()
+	processId       = os.Getpid()
+	process         windows.HWND
+	windowName      = strings.TrimSuffix(filepath.Base(os.Args[0]), ".exe")
 )
 
 var (
-	templates       Templates
-	templateResults TemplateResults
+	displayIndex = 0 // [TODO]
+	capturer     *capture.Capturer
+	screenImage  *image.RGBA
+)
+
+var (
+	roiRect = image.Rect(1986+8, 1197+8, 2114-16, 1306-8)
+	weapons Weapons
 )
 
 // [TODO]? dynamic threshold
 const matchThreshold = 0.9
 
 var (
-	screenshotCost        time.Duration
+	captureCost           time.Duration
 	templatesMatchingCost time.Duration
 	drawCost              time.Duration
 	imShowCost            time.Duration
@@ -84,13 +94,14 @@ var (
 	luaFileIndex = -1
 )
 
-var _ = wiatForInput()
+var _ = debugWaitForInput()
 
-func wiatForInput() (_ struct{}) {
+func debugWaitForInput() (_ struct{}) {
 	if !debug {
 		return
 	}
-	log.Info("waiting for any input...")
+	log.Debugf("pid: %d, ppid: %d", processId, parentProcessId)
+	fmt.Print("waiting for any input...")
 	_, err := bufio.NewReader(os.Stdin).ReadBytes('\n')
 	if err == io.EOF {
 		err = nil
@@ -101,11 +112,6 @@ func wiatForInput() (_ struct{}) {
 
 func init() {
 	var err error
-
-	err = windows.SetPriorityClass(windows.CurrentProcess(), windows.HIGH_PRIORITY_CLASS)
-	if err != nil {
-		log.Warnf("failed to set process priority: %v", err)
-	}
 
 	if windowName == "" {
 		panicIf(fmt.Errorf("failed to initialize window name"))
@@ -120,18 +126,19 @@ func init() {
 		log.Info("[TODO] multi displays select")
 	}
 
-	screenshooter, err = capture.New(displayIndex)
+	capturer, err = capture.New(displayIndex)
 	panicIf(err)
-	log.Infof("display bounds: %dx%d", screenshooter.Bounds().Dx(), screenshooter.Bounds().Dy())
-	screenImage = image.NewRGBA(screenshooter.Bounds())
+	log.Infof("display bounds: %dx%d", capturer.Bounds().Dx(), capturer.Bounds().Dy())
+	screenImage = image.NewRGBA(capturer.Bounds())
+
+	err = windows.SetPriorityClass(windows.CurrentProcess(), windows.HIGH_PRIORITY_CLASS)
+	if err != nil {
+		log.Warnf("failed to set process priority: %v", err)
+	}
 
 	// load template
-	panicIf(templates.IMReadDir("templates", 1, false))
-	log.Infof("templates loaded: %d", len(templates))
-	templateResults = make(TemplateResults, len(templates))
-	for i := range templateResults {
-		templateResults[i].Mat = gocv.NewMat()
-	}
+	panicIf(weapons.ReadFrom(templatesDir, 1, ".png", "__"))
+	log.Infof("num templates loaded: %d", len(weapons))
 }
 
 func main() {
@@ -139,12 +146,7 @@ func main() {
 	defer runtime.UnlockOSThread()
 
 	defer func() {
-		for _, mat := range templateResults {
-			if !mat.Closed() && !mat.Empty() {
-				panicIf(mat.Close())
-			}
-		}
-		panicIf(templates.CloseAll())
+		panicIf(weapons.Close())
 	}()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -166,28 +168,30 @@ func main() {
 
 	outputSignal := make(chan int, 1)
 	go func() {
-		for templateIndex := range outputSignal {
-			if templateIndex == luaFileIndex {
+		for weaponIndex := range outputSignal {
+			if weaponIndex == luaFileIndex {
 				continue
 			}
 
-			if luaFileIndex >= 0 && templateIndex >= 0 {
+			if luaFileIndex >= 0 && weaponIndex >= 0 {
 				os.Stderr.Write([]byte{'\a'})
 			}
 			if luaFileIndex >= 0 {
-				fromTmpl := templates[luaFileIndex].Name
-				var toTmpl string
-				if templateIndex >= 0 {
-					toTmpl = templates[templateIndex].Name
+				from := weapons[luaFileIndex]
+				var to *Weapon
+				var toName string
+				if weaponIndex >= 0 {
+					to = weapons[weaponIndex]
+					toName = to.Name
 				}
 				log.Debugf(
 					"switch from %d(%s) to %d(%s), last maxVal: %.2f",
-					luaFileIndex, fromTmpl,
-					templateIndex, toTmpl,
-					templateResults[luaFileIndex].MaxVal*100,
+					luaFileIndex, from.Name,
+					weaponIndex, toName,
+					from.Template.MaxVal*100,
 				)
 			}
-			luaFileIndex = templateIndex
+			luaFileIndex = weaponIndex
 			err := luaFile.Truncate(0)
 			if err != nil {
 				log.Warnf("luaFile failed to Truncate: %v", err)
@@ -200,22 +204,23 @@ func main() {
 			}
 
 			var content string
-			if templateIndex < 0 { // not found, all zero
+			if weaponIndex < 0 { // not found, all zero
 				content = "FAA=0\nFA1=0\nSAA=0\nSA1=0"
 			} else {
-				tmpl := templates[templateIndex]
-				switch tmpl.Mode {
-				case TEMPLATE_MODE_FA:
-					content = "FAA=" + tmpl.SpeedAcog +
-						"\n" + "FA1=" + tmpl.Speed1x +
+				weapon := weapons[weaponIndex]
+				switch weapon.Mode {
+				case WEAPON_MODE_FULL_AUTO:
+					content = "FAA=" + weapon.SpeedAcog +
+						"\n" + "FA1=" + weapon.Speed1x +
 						"\n" + "SAA=0" + "\n" + "SA1=0"
-				case TEMPLATE_MODE_SA:
+				case WEAPON_MODE_SEMI_AUTO:
 					content = "FAA=0" + "\n" + "FA1=0" +
-						"\n" + "SAA=" + tmpl.SpeedAcog +
-						"\n" + "SA1=" + tmpl.Speed1x
+						"\n" + "SAA=" + weapon.SpeedAcog +
+						"\n" + "SA1=" + weapon.Speed1x
 				default:
-					log.Warnf("unexpected tmpl.Mode: %s", tmpl.Mode)
-					continue
+					log.Warnf("unexpected tmpl.Mode: %s", weapon.Mode)
+					content = "FAA=0" + "\n" + "FA1=0" +
+						"\n" + "SAA=0" + "\n" + "SA1=0"
 				}
 			}
 
@@ -253,7 +258,7 @@ LOOP:
 			// screenshot
 			tStart := time.Now()
 			err := doScreenshot(screenImage, &display)
-			screenshotCost = time.Since(tStart)
+			captureCost = time.Since(tStart)
 			if err == outputduplication.ErrNoImageYet {
 				continue
 			}
@@ -291,14 +296,14 @@ LOOP:
 				}
 				switch key {
 				case ' ':
-					for i := range templates {
-						fmt.Printf("[%d] %s %.2f%%\n", i, templates[i].Name, templateResults[i].MaxVal*100)
+					for i, tmpl := range weapons {
+						fmt.Printf("[%d] %s %.2f%%\n", i, tmpl.Name, tmpl.Template.MaxVal*100)
 					}
 				case 'p', 'P':
 					process = windows.GetForegroundWindow()
 					log.Infof("process: %#X", process)
 				case 'r', 'R':
-					screenshooter.FramesElapsed = 0
+					capturer.FramesElapsed = 0
 					log.Info("screenshooter.FramesElapsed reset")
 				}
 			}
@@ -344,7 +349,7 @@ func imageToMat(img image.Image, dst *gocv.Mat) error {
 }
 
 func doScreenshot(screenImage *image.RGBA, display *gocv.Mat) error {
-	err := screenshooter.GetImage(screenImage)
+	err := capturer.GetImage(screenImage)
 	if err != nil {
 		return err
 	}
@@ -356,20 +361,17 @@ const method = gocv.TmCcoeffNormed
 var lastSuccessfulTempl int
 
 func doMatchWeapon(captureRoi gocv.Mat) (templateIndex, templateMatched int, found bool) {
-	for j := range templates {
+	for j := range weapons {
 		i := j + lastSuccessfulTempl // 从上次成功的模板开始往下匹配
-		i %= len(templates)
+		i %= len(weapons)
 		templateIndex = i
-		tmpl := templates[i]
 
-		tStart := time.Now()
-		panicIf(gocv.MatchTemplate(captureRoi, tmpl.Mat, &templateResults[i].Mat, method, tmpl.Mask))
-		templateResults[i].Cost = time.Since(tStart)
+		tmpl := weapons[i]
+		panicIf(tmpl.Template.Match(captureRoi, method))
 
-		templateResults[i].MinMaxLoc()
 		templateMatched++
 
-		if templateResults[i].MaxVal >= matchThreshold {
+		if tmpl.Template.MaxVal >= matchThreshold {
 			lastSuccessfulTempl = i
 			found = true
 			break // 跳过剩余匹配
@@ -380,7 +382,7 @@ func doMatchWeapon(captureRoi gocv.Mat) (templateIndex, templateMatched int, fou
 
 const fpsMaxHistoryLen = 30
 
-var fpsCounter = NewFpsCounter(time.Second / 2)
+var fpsCounter = fps.NewCounter(time.Second / 2)
 
 func doDraw(display *gocv.Mat, tmplIndex, tmplMatched int, found bool) {
 	gocv.Rectangle(display,
@@ -393,129 +395,102 @@ func doDraw(display *gocv.Mat, tmplIndex, tmplMatched int, found bool) {
 		gocv.FontHersheyDuplex, fontSize,
 		colorCoral, fontThickness,
 	)
-
-	colorPos := colorGreen
-	colorNeg := colorCyan
-	min, max := templateResults.MinMax()
-	var tmplPosMat, tmplNegMat Template
-	var tmplPosResult, tmplNegResult TemplateResult
-	if !found {
-		// 黄框显示最高匹配的模板
-		colorPos = colorYellow
-		tmplIndex = max
-	}
-	tmplPosMat, tmplPosResult = templates[tmplIndex], templateResults[tmplIndex]
-	tmplNegMat, tmplNegResult = templates[min], templateResults[min]
-	if tmplPosResult.MaxVal > 0 {
-		resultPosX := tmplPosResult.MaxLoc.X + roiRect.Min.X
-		resultPosY := tmplPosResult.MaxLoc.Y + roiRect.Min.Y
-		rectPos := image.Rect(
-			resultPosX,
-			resultPosY,
-			resultPosX+tmplPosMat.Width,
-			resultPosY+tmplPosMat.Height,
-		)
-		gocv.Rectangle(display,
-			rectPos,
-			colorPos, borderThickness,
-		)
-
-		textPosX := roiRect.Max.X + fontSpacingX
-		textPosY := roiRect.Min.Y + fontHeight
-		gocv.PutText(display,
-			tmplPosMat.Name,
-			image.Pt(textPosX, textPosY),
-			gocv.FontHersheyDuplex, fontSize,
-			colorPos, fontThickness,
-		)
-		textPosY += fontHeight + fontSpacingY
-		gocv.PutText(display,
-			fmt.Sprintf("%.2f%%", tmplPosResult.MaxVal*100),
-			image.Pt(textPosX, textPosY),
-			gocv.FontHersheyDuplex, fontSize,
-			colorPos, fontThickness,
-		)
-
-		if drawNeg {
-			resultNegX := tmplNegResult.MaxLoc.X + roiRect.Min.X
-			resultNegY := tmplNegResult.MaxLoc.Y + roiRect.Min.Y
-			rectNeg := image.Rect(
-				resultNegX,
-				resultNegY,
-				resultNegX+tmplNegMat.Width,
-				resultNegY+tmplNegMat.Height,
-			)
-			gocv.Rectangle(display,
-				rectNeg,
-				colorNeg, borderThickness,
-			)
-			textNegX := textPosX
-			textNegY := textPosY + 2*(fontHeight+fontSpacingY)
-			gocv.PutText(display,
-				tmplNegMat.Name,
-				image.Pt(textNegX, textNegY),
-				gocv.FontHersheyDuplex, fontSize,
-				colorNeg, fontThickness,
-			)
-			textNegY += fontHeight + fontSpacingY
-			gocv.PutText(display,
-				fmt.Sprintf("%.2f%%", tmplNegResult.MinVal*100),
-				image.Pt(textNegX, textNegY),
-				gocv.FontHersheyDuplex, fontSize,
-				colorNeg, fontThickness,
-			)
-		}
-
-		// 匹配的模板本身
-		tmplPosRect := image.Rect(
-			roiRect.Min.X, // 与ROI左对齐
-			roiRect.Max.Y+borderThickness,
-			roiRect.Min.X+tmplPosMat.Width,
-			roiRect.Max.Y+borderThickness+tmplPosMat.Height,
-		)
-		roiPos := display.Region(tmplPosRect)
-		defer roiPos.Close()
-		if tmplPosMat.Mat.Channels() == 3 && roiPos.Channels() == 3 {
-			tmplPosMat.Mat.CopyTo(&roiPos)
-		} else if tmplPosMat.Mat.Channels() == 1 && roiPos.Channels() == 3 {
-			colorTemplate := gocv.NewMat()
-			defer colorTemplate.Close()
-			gocv.CvtColor(tmplPosMat.Mat, &colorTemplate, gocv.ColorGrayToBGR)
-			colorTemplate.CopyTo(&roiPos)
-		}
-
-		if drawNeg {
-			tmplNegRect := image.Rect(
-				roiRect.Min.X,
-				tmplPosRect.Max.Y,
-				roiRect.Min.X+tmplNegMat.Width,
-				tmplPosRect.Max.Y+tmplNegMat.Height,
-			)
-			roiNeg := display.Region(tmplNegRect)
-			defer roiNeg.Close()
-			if tmplNegMat.Mat.Channels() == 3 && roiNeg.Channels() == 3 {
-				tmplNegMat.Mat.CopyTo(&roiNeg)
-			} else if tmplNegMat.Mat.Channels() == 1 && roiNeg.Channels() == 3 {
-				colorTemplate := gocv.NewMat()
-				defer colorTemplate.Close()
-				gocv.CvtColor(tmplNegMat.Mat, &colorTemplate, gocv.ColorGrayToBGR)
-				colorTemplate.CopyTo(&roiNeg)
-			}
-		}
-	}
-
 	gocv.PutText(display,
 		fmt.Sprintf(
 			"| FPS: %.2f | SSC: %dms | TMC: %dms/%d=%dms | ISC: %dms | %d |",
 			fpsCounter.Count(),
-			screenshotCost/time.Millisecond,
+			captureCost/time.Millisecond,
 			templatesMatchingCost/time.Millisecond, tmplMatched,
 			templatesMatchingCost/time.Duration(tmplMatched)/time.Millisecond,
 			imShowCost/time.Millisecond,
-			screenshooter.FramesElapsed,
+			capturer.FramesElapsed,
 		),
 		image.Pt(10, 60),
 		gocv.FontHersheyDuplex, 2,
 		colorCoral, 4,
 	)
+
+	colorPos := colorGreen
+	colorNeg := colorCyan
+	min, max := weapons.MinMaxIndex()
+	var weaponPos *Weapon
+	weaponNeg := weapons[min]
+	if found {
+		weaponPos = weapons[tmplIndex]
+	} else {
+		weaponPos = weapons[max]
+		// 黄框显示最高匹配的模板
+		colorPos = colorYellow
+	}
+
+	if weaponPos.Template.MaxVal > 0 {
+		drawResultRect(display, colorPos, &weaponPos.Template)
+		drawTextRight(display, colorPos, 0, weaponPos.Name)
+		drawTextRight(display, colorPos, 1, fmt.Sprintf("%.2f%%", weaponPos.Template.MaxVal*100))
+		tmplPosRect := image.Rect( // 匹配的模板本身
+			roiRect.Min.X, // 与ROI左对齐
+			roiRect.Max.Y+borderThickness,
+			roiRect.Min.X+weaponPos.Template.Width,
+			roiRect.Max.Y+borderThickness+weaponPos.Template.Height,
+		)
+		drawTemplate(display, tmplPosRect, &weaponPos.Template)
+
+		if drawNeg {
+			drawResultRect(display, colorNeg, &weaponNeg.Template)
+			drawTextRight(display, colorNeg, 3, weaponNeg.Name)
+			drawTextRight(display, colorNeg, 4, fmt.Sprintf("%.2f%%", weaponNeg.Template.MaxVal*100))
+			tmplNegRect := image.Rect(
+				roiRect.Min.X,
+				tmplPosRect.Max.Y,
+				roiRect.Min.X+weaponNeg.Template.Width,
+				tmplPosRect.Max.Y+weaponNeg.Template.Height,
+			)
+			drawTemplate(display, tmplNegRect, &weaponNeg.Template)
+		}
+
+	}
+}
+
+func drawResultRect(display *gocv.Mat, color color.RGBA, tmpl *template.Template) {
+	resultX := tmpl.MaxLoc.X + roiRect.Min.X
+	resultY := tmpl.MaxLoc.Y + roiRect.Min.Y
+	rect := image.Rect(
+		resultX,
+		resultY,
+		resultX+tmpl.Width,
+		resultY+tmpl.Height,
+	)
+	gocv.Rectangle(display,
+		rect,
+		color, borderThickness,
+	)
+}
+
+func drawTextRight(display *gocv.Mat, color color.RGBA, line int, texts string) {
+	textX := roiRect.Max.X + fontSpacingX
+	textY := roiRect.Min.Y + fontHeight + (line * (fontHeight + fontSpacingY))
+	gocv.PutText(display,
+		texts,
+		image.Pt(textX, textY),
+		gocv.FontHersheyDuplex, fontSize,
+		color, fontThickness,
+	)
+}
+
+func drawTemplate(display *gocv.Mat, rect image.Rectangle, tmpl *template.Template) {
+	region := display.Region(rect)
+	defer region.Close()
+
+	channels := display.Channels()
+
+	if tmpl.Channels == 3 && channels == 3 {
+		tmpl.Mat.CopyTo(&region)
+	} else if tmpl.Channels == 1 && channels == 3 {
+		colorTemplate := gocv.NewMat()
+		defer colorTemplate.Close()
+		gocv.CvtColor(tmpl.Mat, &colorTemplate, gocv.ColorGrayToBGR)
+		colorTemplate.CopyTo(&region)
+	} else {
+		log.Warnf("mismatched channels of template and display: %d, %d", tmpl.Channels, channels)
+	}
 }
