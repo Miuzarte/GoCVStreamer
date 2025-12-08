@@ -65,7 +65,7 @@ const (
 var (
 	parentProcessId = os.Getppid()
 	processId       = os.Getpid()
-	highGuiHandel   windows.HWND
+	windowHandel    windows.HWND
 	windowTitle     = strings.TrimSuffix(filepath.Base(os.Args[0]), ".exe")
 )
 
@@ -87,7 +87,6 @@ var (
 	captureCost           time.Duration
 	templatesMatchingCost time.Duration
 	drawCost              time.Duration
-	imShowCost            time.Duration
 )
 
 var (
@@ -159,9 +158,6 @@ func main() {
 	defer cancel()
 	ctx, _ = signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
 
-	highGui := gocv.NewWindow(windowTitle)
-	defer highGui.Close()
-	highGui.ResizeWindow(1280, 720)
 	display := gocv.NewMat()
 	defer display.Close()
 
@@ -169,77 +165,12 @@ func main() {
 	defer ticker.Stop()
 
 	outputSignal := make(chan int, 1)
+	go outputLua(outputSignal)
+
 	go func() {
-		for weaponIndex := range outputSignal {
-			if weaponIndex == luaFileIndex {
-				continue
-			}
-
-			if luaFileIndex >= 0 && weaponIndex >= 0 {
-				os.Stderr.Write([]byte{'\a'})
-			}
-			if luaFileIndex >= 0 {
-				from := weapons[luaFileIndex]
-				var to *Weapon
-				var toName string
-				if weaponIndex >= 0 {
-					to = weapons[weaponIndex]
-					toName = to.Name
-				}
-				log.Debugf(
-					"switch from %d(%s) to %d(%s), last maxVal: %.2f",
-					luaFileIndex, from.Name,
-					weaponIndex, toName,
-					from.Template.MaxVal*100,
-				)
-			}
-			luaFileIndex = weaponIndex
-			err := luaFile.Truncate(0)
-			if err != nil {
-				log.Warnf("luaFile failed to Truncate: %v", err)
-				continue
-			}
-			_, err = luaFile.Seek(0, io.SeekStart)
-			if err != nil {
-				log.Warnf("luaFile failed to Seek: %v", err)
-				continue
-			}
-
-			var content string
-			if weaponIndex < 0 { // not found, all zero
-				content = "FAA=0\nFA1=0\nSAA=0\nSA1=0"
-			} else {
-				weapon := weapons[weaponIndex]
-				switch weapon.Mode {
-				case WEAPON_MODE_FULL_AUTO:
-					content = "FAA=" + weapon.SpeedAcog +
-						"\n" + "FA1=" + weapon.Speed1x +
-						"\n" + "SAA=0" + "\n" + "SA1=0"
-				case WEAPON_MODE_SEMI_AUTO:
-					content = "FAA=0" + "\n" + "FA1=0" +
-						"\n" + "SAA=" + weapon.SpeedAcog +
-						"\n" + "SA1=" + weapon.Speed1x
-				default:
-					log.Warnf("unexpected tmpl.Mode: %s", weapon.Mode)
-					content = "FAA=0" + "\n" + "FA1=0" +
-						"\n" + "SAA=0" + "\n" + "SA1=0"
-				}
-			}
-
-			_, err = luaFile.WriteString(content)
-			if err != nil {
-				log.Warnf("luaFile failed to WriteString: %v", err)
-				continue
-			}
-			err = luaFile.Sync()
-			if err != nil {
-				log.Warnf("luaFile failed to Sync: %v", err)
-				continue
-			}
-		}
+		defer cancel()
+		runGioui(ctx)
 	}()
-
-	go runGio(ctx)
 
 LOOP:
 	for {
@@ -248,17 +179,6 @@ LOOP:
 			break LOOP
 
 		case <-ticker.C:
-			// 窗口关闭
-			windowProp := highGui.GetWindowProperty(gocv.WindowPropertyVisible)
-			switch {
-			case windowProp < 0:
-				log.Error("unexpected window property: %d", windowProp)
-				fallthrough
-			case windowProp == 0:
-				cancel()
-				continue
-			}
-
 			// screenshot
 			tStart := time.Now()
 			err := doScreenshot(screenImage, &display)
@@ -271,58 +191,105 @@ LOOP:
 			// template match
 			captureRoi := display.Region(roiRect)
 			tStart = time.Now()
-			tmplIndex, tmplMatched, found := doMatchWeapon(captureRoi)
+			weaponIndex, weaponMatched, weaponFound := doMatchWeapon(captureRoi)
 			templatesMatchingCost = time.Since(tStart)
 			captureRoi.Close()
 
 			// output
-			if found {
-				outputSignal <- tmplIndex
+			if weaponFound {
+				outputSignal <- weaponIndex
 			} else {
 				outputSignal <- -1
 			}
 
 			// draw
+			// [TODO] do draw on gioui
 			tStart = time.Now()
-			doDraw(&display, tmplIndex, tmplMatched, found)
+			doDraw(&display, weaponIndex, weaponMatched, weaponFound)
 			drawCost = time.Since(tStart)
 
 			// show
-			tStart = time.Now()
-			panicIf(highGui.IMShow(display))
-			key := highGui.PollKey()
-			imShowCost = time.Since(tStart)
-			if key != -1 {
-				if key < 128 {
-					log.Debugf("key: %d %s", key, string(key))
-				} else {
-					log.Debugf("key: %d", key)
-				}
-				switch key {
-				case ' ':
-					for i, tmpl := range weapons {
-						fmt.Printf("[%d] %s %.2f%%\n", i, tmpl.Name, tmpl.Template.MaxVal*100)
-					}
-				case 'p', 'P':
-					highGuiHandel = windows.GetForegroundWindow()
-					log.Infof("process: %#X", highGuiHandel)
-				case 'r', 'R':
-					capturer.FramesElapsed = 0
-					log.Info("screenshooter.FramesElapsed reset")
-				}
-			}
-
-			// to gioui
 			gioDisplay, err = display.ToImage()
 			if err != nil {
 				log.Warnf("failed to convert mat to image for gioui: %v", err)
+			} else {
+				window.Invalidate()
 			}
-			gioWindow.Invalidate()
 
 		}
 	}
 
 	wg.Wait()
+}
+
+func outputLua(sig chan int) {
+	for weaponIndex := range sig {
+		if weaponIndex == luaFileIndex {
+			continue
+		}
+
+		if luaFileIndex >= 0 && weaponIndex >= 0 {
+			os.Stderr.Write([]byte{'\a'})
+		}
+		if luaFileIndex >= 0 {
+			from := weapons[luaFileIndex]
+			var to *Weapon
+			var toName string
+			if weaponIndex >= 0 {
+				to = weapons[weaponIndex]
+				toName = to.Name
+			}
+			log.Debugf(
+				"switch from %d(%s) to %d(%s), last maxVal: %.2f",
+				luaFileIndex, from.Name,
+				weaponIndex, toName,
+				from.Template.MaxVal*100,
+			)
+		}
+		luaFileIndex = weaponIndex
+		err := luaFile.Truncate(0)
+		if err != nil {
+			log.Warnf("luaFile failed to Truncate: %v", err)
+			continue
+		}
+		_, err = luaFile.Seek(0, io.SeekStart)
+		if err != nil {
+			log.Warnf("luaFile failed to Seek: %v", err)
+			continue
+		}
+
+		var content string
+		if weaponIndex < 0 { // not found, all zero
+			content = "FAA=0\nFA1=0\nSAA=0\nSA1=0"
+		} else {
+			weapon := weapons[weaponIndex]
+			switch weapon.Mode {
+			case WEAPON_MODE_FULL_AUTO:
+				content = "FAA=" + weapon.SpeedAcog +
+					"\n" + "FA1=" + weapon.Speed1x +
+					"\n" + "SAA=0" + "\n" + "SA1=0"
+			case WEAPON_MODE_SEMI_AUTO:
+				content = "FAA=0" + "\n" + "FA1=0" +
+					"\n" + "SAA=" + weapon.SpeedAcog +
+					"\n" + "SA1=" + weapon.Speed1x
+			default:
+				log.Warnf("unexpected tmpl.Mode: %s", weapon.Mode)
+				content = "FAA=0" + "\n" + "FA1=0" +
+					"\n" + "SAA=0" + "\n" + "SA1=0"
+			}
+		}
+
+		_, err = luaFile.WriteString(content)
+		if err != nil {
+			log.Warnf("luaFile failed to WriteString: %v", err)
+			continue
+		}
+		err = luaFile.Sync()
+		if err != nil {
+			log.Warnf("luaFile failed to Sync: %v", err)
+			continue
+		}
+	}
 }
 
 func imageToMat(img image.Image, dst *gocv.Mat) error {
@@ -395,7 +362,7 @@ func doMatchWeapon(captureRoi gocv.Mat) (templateIndex, templateMatched int, fou
 
 const fpsMaxHistoryLen = 30
 
-var fpsCounter = fps.NewCounter(time.Second / 2)
+var cvFps = fps.NewCounter(time.Second / 2)
 
 func doDraw(display *gocv.Mat, tmplIndex, tmplMatched int, found bool) {
 	gocv.Rectangle(display,
@@ -410,12 +377,12 @@ func doDraw(display *gocv.Mat, tmplIndex, tmplMatched int, found bool) {
 	)
 	gocv.PutText(display,
 		fmt.Sprintf(
-			"| FPS: %.2f | SSC: %dms | TMC: %dms/%d=%dms | ISC: %dms | %d |",
-			fpsCounter.Count(),
+			"| FPS: %.2f | SSC: %dms | TMC: %dms/%d=%dms | %d |",
+			cvFps.Count(),
 			captureCost/time.Millisecond,
 			templatesMatchingCost/time.Millisecond, tmplMatched,
 			templatesMatchingCost/time.Duration(tmplMatched)/time.Millisecond,
-			imShowCost/time.Millisecond,
+			// imShowCost/time.Millisecond,
 			capturer.FramesElapsed,
 		),
 		image.Pt(10, 60),
