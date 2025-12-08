@@ -84,8 +84,6 @@ func init() {
 }
 
 func layoutDisplay(gtx layout.Context, img image.Image) {
-	const gioInf = 1000000
-
 	gtxW := gtx.Constraints.Max.X
 	gtxH := gtx.Constraints.Max.Y
 
@@ -109,16 +107,21 @@ func layoutDisplay(gtx layout.Context, img image.Image) {
 	paint.PaintOp{}.Add(gtx.Ops)
 }
 
-var cvFps = fps.NewCounter(time.Second / 2)
+var (
+	cvFps = fps.NewCounter(time.Second / 2)
+	cpu   float64
+)
 
 func layoutGocvInfo(gtx layout.Context) {
 	const ms = float64(time.Millisecond)
 	status := fmt.Sprintf(
-		"| FPS: %.2f | 截图: %.2fms | %d | 绘制: %.2fms |\n| 匹配: %.2fms/%d=%.2fms |",
+		"| FPS: %.2f | 截图: %.1fms | %d | 绘制: %.1fms |\n| CPU: %.1f%% | 匹配: %.1fms/%d=%.2fms |",
 		cvFps.Count(),
 		float64(captureCost)/ms,
 		capturer.FramesElapsed,
 		float64(drawCost)/ms,
+
+		cpu,
 		float64(templatesMatchingCost)/ms, weaponMatched,
 		float64(templatesMatchingCost)/float64(weaponMatched)/ms,
 	)

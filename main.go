@@ -25,12 +25,13 @@ import (
 	"github.com/Miuzarte/SimpleLog"
 	"github.com/kbinani/screenshot"
 	"github.com/kirides/go-d3d/outputduplication"
+	"github.com/shirou/gopsutil/v4/process"
 	"gocv.io/x/gocv"
 	"golang.org/x/sys/windows"
 )
 
 const (
-	debug   = true
+	debug   = false
 	drawNeg = false
 )
 
@@ -45,6 +46,8 @@ var (
 	processId       = os.Getpid()
 	windowHandel    windows.HWND
 	windowTitle     = strings.TrimSuffix(filepath.Base(os.Args[0]), ".exe")
+
+	processSelf *process.Process
 )
 
 var (
@@ -52,9 +55,7 @@ var (
 	capturer     *capture.Capturer
 	screenImage  *image.RGBA
 	roiRect      = image.Rect(1986+8, 1197+8, 2114-16, 1306-8)
-	draggableRoi = DraggableRoi{
-		rect: roiRect,
-	}
+	draggableRoi = DraggableRoi{rect: roiRect}
 )
 
 var (
@@ -102,6 +103,9 @@ func init() {
 		log.Panic("failed to initialize window name")
 	}
 
+	processSelf, err = process.NewProcess(int32(processId))
+	panicIf(err)
+
 	numDisplays := screenshot.NumActiveDisplays()
 	log.Infof("num displays: %d", numDisplays)
 	switch {
@@ -146,6 +150,9 @@ func main() {
 	)
 
 	wg.Go(func() {
+		cpuMeasureLoop(ctx)
+	})
+	wg.Go(func() {
 		outputLuaLoop(ctx)
 	})
 	wg.Go(func() {
@@ -156,6 +163,19 @@ func main() {
 	})
 
 	wg.Wait()
+}
+
+func cpuMeasureLoop(ctx context.Context) {
+	const interval = time.Second
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			cpu, _ = processSelf.PercentWithContext(ctx, interval)
+		}
+	}
 }
 
 func outputLuaLoop(ctx context.Context) {
@@ -322,11 +342,11 @@ func shortcutSetWda() {
 	switch currWda {
 	case WDA_NONE:
 		currWda = WDA_EXCLUDEFROMCAPTURE
-		log.Debug("wda set to WDA_EXCLUDEFROMCAPTURE")
+		log.Info("wda set to WDA_EXCLUDEFROMCAPTURE")
 		err = SetWindowDisplayAffinity(windowHandel, WDA_EXCLUDEFROMCAPTURE)
 	case WDA_EXCLUDEFROMCAPTURE:
 		currWda = WDA_NONE
-		log.Debug("wda set to WDA_NONE")
+		log.Info("wda set to WDA_NONE")
 		err = SetWindowDisplayAffinity(windowHandel, WDA_NONE)
 	}
 
