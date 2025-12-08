@@ -17,8 +17,6 @@ import (
 	"time"
 
 	"github.com/Miuzarte/GoCVStreamer/capture"
-	"github.com/Miuzarte/GoCVStreamer/fps"
-	"github.com/Miuzarte/GoCVStreamer/template"
 
 	"github.com/Miuzarte/SimpleLog"
 	"github.com/kbinani/screenshot"
@@ -42,24 +40,22 @@ const (
 
 var log = SimpleLog.New("[Streamer]", true, false).SetLevel(SimpleLog.DebugLevel)
 
-var (
-	colorCoral  = color.RGBA{0xA6, 0x62, 0x61, 0}
-	colorRed    = color.RGBA{0xFF, 0, 0, 0}
-	colorYellow = color.RGBA{0xFF, 0xFF, 0, 0}
-	colorGreen  = color.RGBA{0, 0xFF, 0, 0}
-	colorCyan   = color.RGBA{0, 0xFF, 0xFF, 0}
-	colorBlue   = color.RGBA{0, 0, 0xFF, 0}
-	colorPurple = color.RGBA{0xFF, 0, 0xFF, 0}
-)
+type rgba struct {
+	R, G, B, A uint8
+}
 
-const (
-	fontSize        = 1
-	fontThickness   = 2 * fontSize
-	fontWidth       = 20 * fontSize
-	fontHeight      = 24 * fontSize
-	fontSpacingX    = 4 * fontThickness
-	fontSpacingY    = 4 * fontThickness
-	borderThickness = 2
+var (
+	colorWhite = rgba{0xFF, 0xFF, 0xFF, 0xFF}
+	colorBlack = rgba{0x00, 0x00, 0x00, 0xFF}
+
+	colorCoral = rgba{0xA6, 0x62, 0x61, 0xFF}
+
+	colorRed    = rgba{0xFF, 0x00, 0x00, 0xFF}
+	colorYellow = rgba{0xFF, 0xFF, 0x00, 0xFF}
+	colorGreen  = rgba{0x00, 0xFF, 0x00, 0xFF}
+	colorCyan   = rgba{0x00, 0xFF, 0xFF, 0xFF}
+	colorBlue   = rgba{0x00, 0x00, 0xFF, 0xFF}
+	colorPurple = rgba{0xFF, 0x00, 0xFF, 0xFF}
 )
 
 var (
@@ -70,14 +66,17 @@ var (
 )
 
 var (
-	displayIndex = 0 // [TODO]
+	displayIndex = 0 // [TODO] 自动取分辨率最高的屏幕
 	capturer     *capture.Capturer
 	screenImage  *image.RGBA
+	roiRect      = image.Rect(1986+8, 1197+8, 2114-16, 1306-8)
 )
 
 var (
-	roiRect = image.Rect(1986+8, 1197+8, 2114-16, 1306-8)
-	weapons Weapons
+	weapons       Weapons
+	weaponIndex   int
+	weaponMatched = 1
+	weaponFound   bool
 )
 
 // [TODO]? dynamic threshold
@@ -191,7 +190,7 @@ LOOP:
 			// template match
 			captureRoi := display.Region(roiRect)
 			tStart = time.Now()
-			weaponIndex, weaponMatched, weaponFound := doMatchWeapon(captureRoi)
+			weaponIndex, weaponMatched, weaponFound = doMatchWeapon(captureRoi)
 			templatesMatchingCost = time.Since(tStart)
 			captureRoi.Close()
 
@@ -202,13 +201,6 @@ LOOP:
 				outputSignal <- -1
 			}
 
-			// draw
-			// [TODO] do draw on gioui
-			tStart = time.Now()
-			doDraw(&display, weaponIndex, weaponMatched, weaponFound)
-			drawCost = time.Since(tStart)
-
-			// show
 			gioDisplay, err = display.ToImage()
 			if err != nil {
 				log.Warnf("failed to convert mat to image for gioui: %v", err)
@@ -333,14 +325,18 @@ func doScreenshot(screenImage *image.RGBA, display *gocv.Mat) error {
 	if err != nil {
 		return err
 	}
-	return imageToMat(screenImage, display)
+	err = imageToMat(screenImage, display)
+	if err != nil {
+		return err
+	}
+	return nil
 }
-
-const method = gocv.TmCcoeffNormed
 
 var lastSuccessfulTempl int
 
 func doMatchWeapon(captureRoi gocv.Mat) (templateIndex, templateMatched int, found bool) {
+	const method = gocv.TmCcoeffNormed
+
 	for j := range weapons {
 		i := j + lastSuccessfulTempl // 从上次成功的模板开始往下匹配
 		i %= len(weapons)
@@ -357,120 +353,6 @@ func doMatchWeapon(captureRoi gocv.Mat) (templateIndex, templateMatched int, fou
 			break // 跳过剩余匹配
 		}
 	}
+
 	return
-}
-
-const fpsMaxHistoryLen = 30
-
-var cvFps = fps.NewCounter(time.Second / 2)
-
-func doDraw(display *gocv.Mat, tmplIndex, tmplMatched int, found bool) {
-	gocv.Rectangle(display,
-		roiRect,
-		colorCoral, borderThickness,
-	)
-	gocv.PutText(display,
-		"ROI",
-		image.Pt(roiRect.Min.X, roiRect.Min.Y-fontSpacingY),
-		gocv.FontHersheyDuplex, fontSize,
-		colorCoral, fontThickness,
-	)
-	gocv.PutText(display,
-		fmt.Sprintf(
-			"| FPS: %.2f | SSC: %dms | TMC: %dms/%d=%dms | %d |",
-			cvFps.Count(),
-			captureCost/time.Millisecond,
-			templatesMatchingCost/time.Millisecond, tmplMatched,
-			templatesMatchingCost/time.Duration(tmplMatched)/time.Millisecond,
-			// imShowCost/time.Millisecond,
-			capturer.FramesElapsed,
-		),
-		image.Pt(10, 60),
-		gocv.FontHersheyDuplex, 2,
-		colorCoral, 4,
-	)
-
-	colorPos := colorGreen
-	colorNeg := colorCyan
-	min, max := weapons.MinMaxIndex()
-	var weaponPos *Weapon
-	weaponNeg := weapons[min]
-	if found {
-		weaponPos = weapons[tmplIndex]
-	} else {
-		weaponPos = weapons[max]
-		// 黄框显示最高匹配的模板
-		colorPos = colorYellow
-	}
-
-	if weaponPos.Template.MaxVal > 0 {
-		drawResultRect(display, colorPos, &weaponPos.Template)
-		drawTextRight(display, colorPos, 0, weaponPos.Name)
-		drawTextRight(display, colorPos, 1, fmt.Sprintf("%.2f%%", weaponPos.Template.MaxVal*100))
-		tmplPosRect := image.Rect( // 匹配的模板本身
-			roiRect.Min.X, // 与ROI左对齐
-			roiRect.Max.Y+borderThickness,
-			roiRect.Min.X+weaponPos.Template.Width,
-			roiRect.Max.Y+borderThickness+weaponPos.Template.Height,
-		)
-		drawTemplate(display, tmplPosRect, &weaponPos.Template)
-
-		if drawNeg {
-			drawResultRect(display, colorNeg, &weaponNeg.Template)
-			drawTextRight(display, colorNeg, 3, weaponNeg.Name)
-			drawTextRight(display, colorNeg, 4, fmt.Sprintf("%.2f%%", weaponNeg.Template.MaxVal*100))
-			tmplNegRect := image.Rect(
-				roiRect.Min.X,
-				tmplPosRect.Max.Y,
-				roiRect.Min.X+weaponNeg.Template.Width,
-				tmplPosRect.Max.Y+weaponNeg.Template.Height,
-			)
-			drawTemplate(display, tmplNegRect, &weaponNeg.Template)
-		}
-
-	}
-}
-
-func drawResultRect(display *gocv.Mat, color color.RGBA, tmpl *template.Template) {
-	resultX := tmpl.MaxLoc.X + roiRect.Min.X
-	resultY := tmpl.MaxLoc.Y + roiRect.Min.Y
-	rect := image.Rect(
-		resultX,
-		resultY,
-		resultX+tmpl.Width,
-		resultY+tmpl.Height,
-	)
-	gocv.Rectangle(display,
-		rect,
-		color, borderThickness,
-	)
-}
-
-func drawTextRight(display *gocv.Mat, color color.RGBA, line int, texts string) {
-	textX := roiRect.Max.X + fontSpacingX
-	textY := roiRect.Min.Y + fontHeight + (line * (fontHeight + fontSpacingY))
-	gocv.PutText(display,
-		texts,
-		image.Pt(textX, textY),
-		gocv.FontHersheyDuplex, fontSize,
-		color, fontThickness,
-	)
-}
-
-func drawTemplate(display *gocv.Mat, rect image.Rectangle, tmpl *template.Template) {
-	region := display.Region(rect)
-	defer region.Close()
-
-	channels := display.Channels()
-
-	if tmpl.Channels == 3 && channels == 3 {
-		tmpl.Mat.CopyTo(&region)
-	} else if tmpl.Channels == 1 && channels == 3 {
-		colorTemplate := gocv.NewMat()
-		defer colorTemplate.Close()
-		gocv.CvtColor(tmpl.Mat, &colorTemplate, gocv.ColorGrayToBGR)
-		colorTemplate.CopyTo(&region)
-	} else {
-		log.Warnf("mismatched channels of template and display: %d, %d", tmpl.Channels, channels)
-	}
 }

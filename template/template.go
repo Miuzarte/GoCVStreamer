@@ -10,6 +10,7 @@ import (
 )
 
 type Template struct {
+	Raw           image.Image
 	Mat           gocv.Mat
 	Channels      int
 	Width, Height int
@@ -55,6 +56,11 @@ func (t *Template) IMReadFrom(path string, createMask bool) error {
 		}
 	}
 
+	var err error
+	t.Raw, err = t.Mat.ToImage()
+	if err != nil {
+		return err
+	}
 	t.Channels = t.Mat.Channels()
 	t.Width, t.Height = t.Mat.Cols(), t.Mat.Rows()
 
