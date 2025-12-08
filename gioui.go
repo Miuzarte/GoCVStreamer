@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"image"
 	"image/color"
@@ -18,7 +17,6 @@ import (
 	"github.com/Miuzarte/GoCVStreamer/fps"
 	"github.com/Miuzarte/GoCVStreamer/template"
 	"github.com/Miuzarte/GoCVStreamer/widgets"
-	"golang.org/x/sys/windows"
 )
 
 const (
@@ -26,10 +24,25 @@ const (
 	borderThickness = 2
 )
 
+type rgba struct {
+	R, G, B, A uint8
+}
+
 var (
-	window     app.Window
-	gioDisplay image.Image
+	colorWhite = rgba{0xFF, 0xFF, 0xFF, 0xFF}
+	colorBlack = rgba{0x00, 0x00, 0x00, 0xFF}
+
+	colorCoral = rgba{0xA6, 0x62, 0x61, 0xFF}
+
+	colorRed    = rgba{0xFF, 0x00, 0x00, 0xFF}
+	colorYellow = rgba{0xFF, 0xFF, 0x00, 0xFF}
+	colorGreen  = rgba{0x00, 0xFF, 0x00, 0xFF}
+	colorCyan   = rgba{0x00, 0xFF, 0xFF, 0xFF}
+	colorBlue   = rgba{0x00, 0x00, 0xFF, 0xFF}
+	colorPurple = rgba{0xFF, 0x00, 0xFF, 0xFF}
 )
+
+var window app.Window
 
 var (
 	dScale unit.Metric
@@ -38,27 +51,15 @@ var (
 	shortcuts = widgets.NewShortcuts(&window,
 		widgets.Shortcut{
 			Key: widgets.NewShortcut(0, 0, key.NameSpace),
-			F: func() {
-				for i, tmpl := range weapons {
-					fmt.Printf("[%d] %s %.2f%%\n", i, tmpl.Name, tmpl.Template.MaxVal*100)
-				}
-			},
+			F:   shortcutListWeapons,
 		},
 		widgets.Shortcut{
 			Key: widgets.NewShortcut(0, 0, "P", "p"),
-			F: func() {
-				windowHandel = windows.GetForegroundWindow()
-				log.Infof("parent process id: %d", parentProcessId)
-				log.Infof("process id: %d", processId)
-				log.Infof("window handel: %#X", windowHandel)
-			},
+			F:   shortcutPrintProcess,
 		},
 		widgets.Shortcut{
 			Key: widgets.NewShortcut(0, 0, "R", "r"),
-			F: func() {
-				capturer.FramesElapsed = 0
-				log.Info("capturer.FramesElapsed reset")
-			},
+			F:   shortcutResetFreamsElapsed,
 		},
 	)
 )
@@ -70,58 +71,6 @@ func init() {
 	mTheme.ContrastBg = color.NRGBA(colorCoral)
 	mTheme.Face = "Maple Mono Normal NF CN"
 	widgets.Theme = mTheme
-}
-
-func runGioui(ctx context.Context) {
-	window.Option(
-		app.Title(windowTitle),
-		app.MinSize(1280, 720),
-		app.Size(1280, 720),
-	)
-
-	go func() {
-		var ops op.Ops
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-
-			switch e := window.Event().(type) {
-			case app.DestroyEvent:
-				if e.Err != nil {
-					log.Errorf("window error: %v", e.Err)
-				}
-				return
-
-			case app.FrameEvent:
-				gtx := app.NewContext(&ops, e)
-				dScale = gtx.Metric
-
-				err := shortcuts.Match(gtx)
-				if err != nil {
-					log.Warnf("shortcuts match error: %v", err)
-				}
-
-				tStart := time.Now()
-				if gioDisplay != nil {
-					layoutDisplay(gtx, gioDisplay)
-				}
-				layoutGocvInfo(gtx)
-				drawCost = time.Since(tStart)
-
-				e.Frame(gtx.Ops)
-
-			case app.ConfigEvent:
-			// case app.wakeupEvent:
-			default:
-				log.Tracef("event[%T]: %v", e, e)
-			}
-		}
-	}()
-
-	app.Main()
 }
 
 func layoutDisplay(gtx layout.Context, img image.Image) {

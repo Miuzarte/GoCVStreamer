@@ -16,6 +16,9 @@ import (
 	"syscall"
 	"time"
 
+	"gioui.org/app"
+	"gioui.org/op"
+
 	"github.com/Miuzarte/GoCVStreamer/capture"
 
 	"github.com/Miuzarte/SimpleLog"
@@ -31,32 +34,10 @@ const (
 )
 
 const (
-	KEY_ESC = 27
-)
-
-const (
 	templatesDir = "templates"
 )
 
 var log = SimpleLog.New("[Streamer]", true, false).SetLevel(SimpleLog.DebugLevel)
-
-type rgba struct {
-	R, G, B, A uint8
-}
-
-var (
-	colorWhite = rgba{0xFF, 0xFF, 0xFF, 0xFF}
-	colorBlack = rgba{0x00, 0x00, 0x00, 0xFF}
-
-	colorCoral = rgba{0xA6, 0x62, 0x61, 0xFF}
-
-	colorRed    = rgba{0xFF, 0x00, 0x00, 0xFF}
-	colorYellow = rgba{0xFF, 0xFF, 0x00, 0xFF}
-	colorGreen  = rgba{0x00, 0xFF, 0x00, 0xFF}
-	colorCyan   = rgba{0x00, 0xFF, 0xFF, 0xFF}
-	colorBlue   = rgba{0x00, 0x00, 0xFF, 0xFF}
-	colorPurple = rgba{0xFF, 0x00, 0xFF, 0xFF}
-)
 
 var (
 	parentProcessId = os.Getppid()
@@ -91,6 +72,7 @@ var (
 var (
 	luaFile      *os.File
 	luaFileIndex = -1
+	outputSignal = make(chan int, 1)
 )
 
 var _ = debugWaitForInput()
@@ -144,10 +126,6 @@ func init() {
 }
 
 func main() {
-	// [TODO] OpenCV单独开协程并锁定线程, 仅该协程存在C调用
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-
 	defer func() {
 		panicIf(weapons.Close())
 	}()
@@ -157,30 +135,183 @@ func main() {
 	defer cancel()
 	ctx, _ = signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
 
-	display := gocv.NewMat()
-	defer display.Close()
+	window.Option(
+		app.Title(windowTitle),
+		app.MinSize(1280, 720),
+		app.Size(1280, 720),
+	)
+
+	wg.Go(func() {
+		outputLuaLoop(ctx)
+	})
+	wg.Go(func() {
+		windowLoop(ctx, cancel)
+	})
+	wg.Go(func() {
+		captureMatchLoop(ctx)
+	})
+
+	wg.Wait()
+}
+
+func outputLuaLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+
+		case weaponIndex := <-outputSignal:
+			if weaponIndex == luaFileIndex {
+				continue
+			}
+
+			if luaFileIndex >= 0 && weaponIndex >= 0 {
+				os.Stderr.Write([]byte{'\a'})
+			}
+			if luaFileIndex >= 0 {
+				from := weapons[luaFileIndex]
+				var to *Weapon
+				var toName string
+				if weaponIndex >= 0 {
+					to = weapons[weaponIndex]
+					toName = to.Name
+				}
+				log.Debugf(
+					"switch from %d(%s) to %d(%s), last maxVal: %.2f",
+					luaFileIndex, from.Name,
+					weaponIndex, toName,
+					from.Template.MaxVal*100,
+				)
+			}
+			luaFileIndex = weaponIndex
+			err := luaFile.Truncate(0)
+			if err != nil {
+				log.Warnf("luaFile failed to Truncate: %v", err)
+				continue
+			}
+			_, err = luaFile.Seek(0, io.SeekStart)
+			if err != nil {
+				log.Warnf("luaFile failed to Seek: %v", err)
+				continue
+			}
+
+			var content string
+			if weaponIndex < 0 { // not found, all zero
+				content = "FAA=0\nFA1=0\nSAA=0\nSA1=0"
+			} else {
+				weapon := weapons[weaponIndex]
+				switch weapon.Mode {
+				case WEAPON_MODE_FULL_AUTO:
+					content = "FAA=" + weapon.SpeedAcog +
+						"\n" + "FA1=" + weapon.Speed1x +
+						"\n" + "SAA=0" + "\n" + "SA1=0"
+				case WEAPON_MODE_SEMI_AUTO:
+					content = "FAA=0" + "\n" + "FA1=0" +
+						"\n" + "SAA=" + weapon.SpeedAcog +
+						"\n" + "SA1=" + weapon.Speed1x
+				default:
+					log.Warnf("unexpected tmpl.Mode: %s", weapon.Mode)
+					content = "FAA=0" + "\n" + "FA1=0" +
+						"\n" + "SAA=0" + "\n" + "SA1=0"
+				}
+			}
+
+			_, err = luaFile.WriteString(content)
+			if err != nil {
+				log.Warnf("luaFile failed to WriteString: %v", err)
+				continue
+			}
+			err = luaFile.Sync()
+			if err != nil {
+				log.Warnf("luaFile failed to Sync: %v", err)
+				continue
+			}
+		}
+	}
+}
+
+func windowLoop(ctx context.Context, cancel context.CancelFunc) {
+	defer cancel()
+	var ops op.Ops
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		switch e := window.Event().(type) {
+		case app.DestroyEvent:
+			if e.Err != nil {
+				log.Errorf("window error: %v", e.Err)
+			} else {
+				log.Debug("window closed normally")
+			}
+			return
+
+		case app.FrameEvent:
+			gtx := app.NewContext(&ops, e)
+			dScale = gtx.Metric
+
+			err := shortcuts.Match(gtx)
+			if err != nil {
+				log.Warnf("shortcuts match error: %v", err)
+			}
+
+			tStart := time.Now()
+			if screenImage != nil {
+				layoutDisplay(gtx, screenImage)
+			}
+			layoutGocvInfo(gtx)
+			drawCost = time.Since(tStart)
+
+			e.Frame(gtx.Ops)
+
+		case app.ConfigEvent:
+		// case app.wakeupEvent:
+		default:
+			log.Tracef("event[%T]: %v", e, e)
+		}
+	}
+}
+
+func shortcutListWeapons() {
+	for i, tmpl := range weapons {
+		fmt.Printf("[%d] %s %.2f%%\n", i, tmpl.Name, tmpl.Template.MaxVal*100)
+	}
+}
+
+func shortcutPrintProcess() {
+	windowHandel = windows.GetForegroundWindow()
+	log.Infof("parent process id: %d", parentProcessId)
+	log.Infof("process id: %d", processId)
+	log.Infof("window handel: %#X", windowHandel)
+}
+
+func shortcutResetFreamsElapsed() {
+	capturer.FramesElapsed = 0
+	log.Info("capturer.FramesElapsed reset")
+}
+
+func captureMatchLoop(ctx context.Context) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	capture := gocv.NewMat()
+	defer capture.Close()
 
 	ticker := time.NewTicker(time.Millisecond * 128)
 	defer ticker.Stop()
 
-	outputSignal := make(chan int, 1)
-	go outputLua(outputSignal)
-
-	go func() {
-		defer cancel()
-		runGioui(ctx)
-	}()
-
-LOOP:
 	for {
 		select {
 		case <-ctx.Done():
-			break LOOP
+			return
 
 		case <-ticker.C:
 			// screenshot
 			tStart := time.Now()
-			err := doScreenshot(screenImage, &display)
+			err := doScreenshot(screenImage, &capture)
 			captureCost = time.Since(tStart)
 			if err == outputduplication.ErrNoImageYet {
 				continue
@@ -188,7 +319,7 @@ LOOP:
 			panicIf(err)
 
 			// template match
-			captureRoi := display.Region(roiRect)
+			captureRoi := capture.Region(roiRect)
 			tStart = time.Now()
 			weaponIndex, weaponMatched, weaponFound = doMatchWeapon(captureRoi)
 			templatesMatchingCost = time.Since(tStart)
@@ -201,85 +332,7 @@ LOOP:
 				outputSignal <- -1
 			}
 
-			gioDisplay, err = display.ToImage()
-			if err != nil {
-				log.Warnf("failed to convert mat to image for gioui: %v", err)
-			} else {
-				window.Invalidate()
-			}
-
-		}
-	}
-
-	wg.Wait()
-}
-
-func outputLua(sig chan int) {
-	for weaponIndex := range sig {
-		if weaponIndex == luaFileIndex {
-			continue
-		}
-
-		if luaFileIndex >= 0 && weaponIndex >= 0 {
-			os.Stderr.Write([]byte{'\a'})
-		}
-		if luaFileIndex >= 0 {
-			from := weapons[luaFileIndex]
-			var to *Weapon
-			var toName string
-			if weaponIndex >= 0 {
-				to = weapons[weaponIndex]
-				toName = to.Name
-			}
-			log.Debugf(
-				"switch from %d(%s) to %d(%s), last maxVal: %.2f",
-				luaFileIndex, from.Name,
-				weaponIndex, toName,
-				from.Template.MaxVal*100,
-			)
-		}
-		luaFileIndex = weaponIndex
-		err := luaFile.Truncate(0)
-		if err != nil {
-			log.Warnf("luaFile failed to Truncate: %v", err)
-			continue
-		}
-		_, err = luaFile.Seek(0, io.SeekStart)
-		if err != nil {
-			log.Warnf("luaFile failed to Seek: %v", err)
-			continue
-		}
-
-		var content string
-		if weaponIndex < 0 { // not found, all zero
-			content = "FAA=0\nFA1=0\nSAA=0\nSA1=0"
-		} else {
-			weapon := weapons[weaponIndex]
-			switch weapon.Mode {
-			case WEAPON_MODE_FULL_AUTO:
-				content = "FAA=" + weapon.SpeedAcog +
-					"\n" + "FA1=" + weapon.Speed1x +
-					"\n" + "SAA=0" + "\n" + "SA1=0"
-			case WEAPON_MODE_SEMI_AUTO:
-				content = "FAA=0" + "\n" + "FA1=0" +
-					"\n" + "SAA=" + weapon.SpeedAcog +
-					"\n" + "SA1=" + weapon.Speed1x
-			default:
-				log.Warnf("unexpected tmpl.Mode: %s", weapon.Mode)
-				content = "FAA=0" + "\n" + "FA1=0" +
-					"\n" + "SAA=0" + "\n" + "SA1=0"
-			}
-		}
-
-		_, err = luaFile.WriteString(content)
-		if err != nil {
-			log.Warnf("luaFile failed to WriteString: %v", err)
-			continue
-		}
-		err = luaFile.Sync()
-		if err != nil {
-			log.Warnf("luaFile failed to Sync: %v", err)
-			continue
+			window.Invalidate()
 		}
 	}
 }
