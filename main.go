@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -64,8 +65,8 @@ const (
 var (
 	parentProcessId = os.Getppid()
 	processId       = os.Getpid()
-	process         windows.HWND
-	windowName      = strings.TrimSuffix(filepath.Base(os.Args[0]), ".exe")
+	highGuiHandel   windows.HWND
+	windowTitle     = strings.TrimSuffix(filepath.Base(os.Args[0]), ".exe")
 )
 
 var (
@@ -113,7 +114,7 @@ func debugWaitForInput() (_ struct{}) {
 func init() {
 	var err error
 
-	if windowName == "" {
+	if windowTitle == "" {
 		panicIf(fmt.Errorf("failed to initialize window name"))
 	}
 
@@ -139,9 +140,13 @@ func init() {
 	// load template
 	panicIf(weapons.ReadFrom(templatesDir, 1, ".png", "__"))
 	log.Infof("num templates loaded: %d", len(weapons))
+
+	luaFile, err = os.OpenFile("speed.lua", os.O_WRONLY|os.O_CREATE, 0o664)
+	panicIf(err)
 }
 
 func main() {
+	// [TODO] OpenCV单独开协程并锁定线程, 仅该协程存在C调用
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
@@ -149,19 +154,16 @@ func main() {
 		panicIf(weapons.Close())
 	}()
 
+	wg := sync.WaitGroup{}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ctx, _ = signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
 
-	window := gocv.NewWindow(windowName)
-	defer window.Close()
-	window.ResizeWindow(1280, 720)
+	highGui := gocv.NewWindow(windowTitle)
+	defer highGui.Close()
+	highGui.ResizeWindow(1280, 720)
 	display := gocv.NewMat()
 	defer display.Close()
-
-	var err error
-	luaFile, err = os.OpenFile("speed.lua", os.O_WRONLY|os.O_CREATE, 0o664)
-	panicIf(err)
 
 	ticker := time.NewTicker(time.Millisecond * 128)
 	defer ticker.Stop()
@@ -237,6 +239,8 @@ func main() {
 		}
 	}()
 
+	go runGio(ctx)
+
 LOOP:
 	for {
 		select {
@@ -245,7 +249,7 @@ LOOP:
 
 		case <-ticker.C:
 			// 窗口关闭
-			windowProp := window.GetWindowProperty(gocv.WindowPropertyVisible)
+			windowProp := highGui.GetWindowProperty(gocv.WindowPropertyVisible)
 			switch {
 			case windowProp < 0:
 				log.Error("unexpected window property: %d", windowProp)
@@ -285,8 +289,8 @@ LOOP:
 
 			// show
 			tStart = time.Now()
-			panicIf(window.IMShow(display))
-			key := window.PollKey()
+			panicIf(highGui.IMShow(display))
+			key := highGui.PollKey()
 			imShowCost = time.Since(tStart)
 			if key != -1 {
 				if key < 128 {
@@ -300,16 +304,25 @@ LOOP:
 						fmt.Printf("[%d] %s %.2f%%\n", i, tmpl.Name, tmpl.Template.MaxVal*100)
 					}
 				case 'p', 'P':
-					process = windows.GetForegroundWindow()
-					log.Infof("process: %#X", process)
+					highGuiHandel = windows.GetForegroundWindow()
+					log.Infof("process: %#X", highGuiHandel)
 				case 'r', 'R':
 					capturer.FramesElapsed = 0
 					log.Info("screenshooter.FramesElapsed reset")
 				}
 			}
 
+			// to gioui
+			gioDisplay, err = display.ToImage()
+			if err != nil {
+				log.Warnf("failed to convert mat to image for gioui: %v", err)
+			}
+			gioWindow.Invalidate()
+
 		}
 	}
+
+	wg.Wait()
 }
 
 func imageToMat(img image.Image, dst *gocv.Mat) error {
