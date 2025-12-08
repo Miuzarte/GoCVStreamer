@@ -13,7 +13,9 @@ import (
 	"gioui.org/op"
 	"gioui.org/op/paint"
 	"gioui.org/unit"
+	"gioui.org/widget"
 	"gioui.org/widget/material"
+
 	"github.com/Miuzarte/GoCVStreamer/fps"
 	"github.com/Miuzarte/GoCVStreamer/template"
 	"github.com/Miuzarte/GoCVStreamer/widgets"
@@ -58,8 +60,16 @@ var (
 			F:   shortcutPrintProcess,
 		},
 		widgets.Shortcut{
-			Key: widgets.NewShortcut(0, 0, "R", "r"),
+			Key: widgets.NewShortcut(0, 0, "F", "f"),
 			F:   shortcutResetFreamsElapsed,
+		},
+		widgets.Shortcut{
+			Key: widgets.NewShortcut(0, 0, "R", "r"),
+			F:   shortcutResetRoi,
+		},
+		widgets.Shortcut{
+			Key: widgets.NewShortcut(0, 0, "T", "t"),
+			F:   shortcutSetWda,
 		},
 	)
 )
@@ -114,20 +124,27 @@ func layoutGocvInfo(gtx layout.Context) {
 	)
 	widgets.Label(fontSize*1.5, status).Layout(gtx)
 
+	draggableRoi.Layout(gtx)
+
 	roiRectScaled := scaleRect(
 		capturer.Bounds().Max, gtx.Constraints.Max,
-		roiRect,
+		draggableRoi.rect,
 	)
 	layoutRectAbsPos(gtx, color.NRGBA(colorCoral), roiRectScaled)
 
 	labelPosScaled := scalePos(
 		capturer.Bounds().Max, gtx.Constraints.Max,
 		image.Pt(
-			roiRect.Min.X,
-			roiRect.Min.Y-(fontSize*2.5),
+			draggableRoi.rect.Min.X,
+			draggableRoi.rect.Min.Y-(fontSize*2.5),
 		),
 	)
-	layoutLabelAbsPos(gtx, color.NRGBA(colorCoral), labelPosScaled, fontSize, "ROI")
+	if !draggableRoi.Dragging() {
+		layoutLabelAbsPos(gtx, color.NRGBA(colorCoral), labelPosScaled, fontSize, "ROI")
+	} else {
+		layoutLabelAbsPos(gtx, color.NRGBA(colorCoral), labelPosScaled, fontSize, fmt.Sprint(draggableRoi.rect.Min))
+		layoutLabelAbsPos(gtx, color.NRGBA(colorCoral), labelPosScaled.Add(roiRectScaled.Size()), fontSize, fmt.Sprint(draggableRoi.rect.Max))
+	}
 
 	colorPos := colorGreen
 	colorNeg := colorCyan
@@ -146,8 +163,8 @@ func layoutGocvInfo(gtx layout.Context) {
 		tmplPosPos := scalePos(
 			capturer.Bounds().Max, gtx.Constraints.Max,
 			image.Pt(
-				roiRect.Min.X, // 与ROI左对齐
-				roiRect.Max.Y,
+				draggableRoi.rect.Min.X, // 与ROI左对齐
+				draggableRoi.rect.Max.Y,
 			),
 		)
 		tmplPosPos.Y += borderThickness / 2
@@ -178,7 +195,7 @@ func layoutResultRect(gtx layout.Context, color color.NRGBA, tmpl *template.Temp
 			tmpl.MaxLoc.Y,
 			tmpl.MaxLoc.X+tmpl.Width,
 			tmpl.MaxLoc.Y+tmpl.Height,
-		).Add(roiRect.Min),
+		).Add(draggableRoi.rect.Min),
 	)
 	return layoutRectAbsPos(gtx, color, rect)
 }
@@ -186,7 +203,64 @@ func layoutResultRect(gtx layout.Context, color color.NRGBA, tmpl *template.Temp
 func layoutTextRight(gtx layout.Context, color color.NRGBA, roiRect image.Rectangle, line int, txt string) layout.Dimensions {
 	pos := image.Pt(
 		roiRect.Max.X+fontSize/4,
-		roiRect.Min.Y-0.5*fontSize+line*fontSize,
+		roiRect.Min.Y+2-0.5*fontSize+line*fontSize,
 	)
 	return layoutLabelAbsPos(gtx, color, pos, fontSize, txt)
+}
+
+type DraggableRoi struct {
+	widget.Draggable
+	rect      image.Rectangle
+	dragStart image.Rectangle
+	printPos  bool
+}
+
+func (d *DraggableRoi) Layout(gtx layout.Context) layout.Dimensions {
+	d.Draggable.Update(gtx)
+
+	if d.Draggable.Dragging() {
+		pos := d.Draggable.Pos()
+
+		if pos.X == 0 && pos.Y == 0 {
+			d.dragStart = d.rect
+		} else {
+			newRect := d.dragStart.Add(image.Pt(int(pos.X), int(pos.Y)))
+
+			bounds := capturer.Bounds()
+			if newRect.Min.X < bounds.Min.X {
+				diff := bounds.Min.X - newRect.Min.X
+				newRect = newRect.Add(image.Pt(diff, 0))
+			}
+			if newRect.Min.Y < bounds.Min.Y {
+				diff := bounds.Min.Y - newRect.Min.Y
+				newRect = newRect.Add(image.Pt(0, diff))
+			}
+			if newRect.Max.X > bounds.Max.X {
+				diff := newRect.Max.X - bounds.Max.X
+				newRect = newRect.Add(image.Pt(-diff, 0))
+			}
+			if newRect.Max.Y > bounds.Max.Y {
+				diff := newRect.Max.Y - bounds.Max.Y
+				newRect = newRect.Add(image.Pt(0, -diff))
+			}
+
+			d.rect = newRect
+			d.printPos = true
+		}
+
+	} else if d.printPos {
+		// 松开打印一次
+		d.printPos = false
+		log.Infof("current roi region: %v", d.rect)
+
+	}
+
+	roiRectScaled := scaleRect(
+		capturer.Bounds().Max, gtx.Constraints.Max,
+		d.rect,
+	)
+	defer op.Offset(roiRectScaled.Min).Push(gtx.Ops).Pop()
+	return d.Draggable.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		return layout.Dimensions{Size: roiRectScaled.Size()}
+	}, nil)
 }

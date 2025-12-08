@@ -18,6 +18,7 @@ import (
 
 	"gioui.org/app"
 	"gioui.org/op"
+	"gioui.org/widget"
 
 	"github.com/Miuzarte/GoCVStreamer/capture"
 
@@ -29,7 +30,7 @@ import (
 )
 
 const (
-	debug   = false
+	debug   = true
 	drawNeg = false
 )
 
@@ -51,6 +52,9 @@ var (
 	capturer     *capture.Capturer
 	screenImage  *image.RGBA
 	roiRect      = image.Rect(1986+8, 1197+8, 2114-16, 1306-8)
+	draggableRoi = DraggableRoi{
+		rect: roiRect,
+	}
 )
 
 var (
@@ -95,14 +99,14 @@ func init() {
 	var err error
 
 	if windowTitle == "" {
-		panicIf(fmt.Errorf("failed to initialize window name"))
+		log.Panic("failed to initialize window name")
 	}
 
 	numDisplays := screenshot.NumActiveDisplays()
 	log.Infof("num displays: %d", numDisplays)
 	switch {
 	case numDisplays == 0:
-		panicIf(fmt.Errorf("display not found"))
+		log.Panic("display not found")
 	case numDisplays > 1:
 		log.Info("[TODO] multi displays select")
 	}
@@ -230,6 +234,12 @@ func outputLuaLoop(ctx context.Context) {
 	}
 }
 
+var (
+	roiDraggable widget.Draggable
+	roiDragStart image.Rectangle // 拖动开始时ROI的原始位置
+	roiMutex     sync.RWMutex    // 保护roiRect的并发访问
+)
+
 func windowLoop(ctx context.Context, cancel context.CancelFunc) {
 	defer cancel()
 	var ops op.Ops
@@ -293,6 +303,38 @@ func shortcutResetFreamsElapsed() {
 	log.Info("capturer.FramesElapsed reset")
 }
 
+func shortcutResetRoi() {
+	draggableRoi.rect = roiRect
+	log.Info("roi reset done")
+}
+
+func shortcutSetWda() {
+	if windowHandel == 0 {
+		windowHandel = windows.GetForegroundWindow()
+	}
+
+	currWda, err := GetWindowDisplayAffinity(windowHandel)
+	if err != nil {
+		log.Errorf("failed to GetWindowDisplayAffinity: %v", err)
+		return
+	}
+
+	switch currWda {
+	case WDA_NONE:
+		currWda = WDA_EXCLUDEFROMCAPTURE
+		log.Debug("wda set to WDA_EXCLUDEFROMCAPTURE")
+		err = SetWindowDisplayAffinity(windowHandel, WDA_EXCLUDEFROMCAPTURE)
+	case WDA_EXCLUDEFROMCAPTURE:
+		currWda = WDA_NONE
+		log.Debug("wda set to WDA_NONE")
+		err = SetWindowDisplayAffinity(windowHandel, WDA_NONE)
+	}
+
+	if err != nil {
+		log.Errorf("failed to SetWindowDisplayAffinity: %v", err)
+	}
+}
+
 func captureMatchLoop(ctx context.Context) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
@@ -318,8 +360,18 @@ func captureMatchLoop(ctx context.Context) {
 			}
 			panicIf(err)
 
+			if draggableRoi.Draggable.Dragging() {
+				continue
+			}
+			currSize := draggableRoi.rect.Size()
+			origSize := roiRect.Size()
+			if currSize.X < origSize.X || currSize.Y < origSize.Y {
+				log.Warnf("draggableRoi.rect < roiRect: %v", currSize)
+				continue
+			}
+
 			// template match
-			captureRoi := capture.Region(roiRect)
+			captureRoi := capture.Region(draggableRoi.rect)
 			tStart = time.Now()
 			weaponIndex, weaponMatched, weaponFound = doMatchWeapon(captureRoi)
 			templatesMatchingCost = time.Since(tStart)

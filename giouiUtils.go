@@ -9,6 +9,7 @@ import (
 	"gioui.org/op"
 	"gioui.org/op/paint"
 	"gioui.org/unit"
+
 	"github.com/Miuzarte/GoCVStreamer/widgets"
 )
 
