@@ -7,6 +7,7 @@ import (
 	"image"
 	"image/color"
 	"io"
+	"math/bits"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -17,8 +18,8 @@ import (
 	"time"
 
 	"gioui.org/app"
+	"gioui.org/io/key"
 	"gioui.org/op"
-	"gioui.org/widget"
 
 	"github.com/Miuzarte/GoCVStreamer/capture"
 
@@ -54,8 +55,8 @@ var (
 	displayIndex = 0 // [TODO] 自动取分辨率最高的屏幕
 	capturer     *capture.Capturer
 	screenImage  *image.RGBA
-	roiRect      = image.Rect(1986+8, 1197+8, 2114-16, 1306-8)
-	draggableRoi = DraggableRoi{rect: roiRect}
+	origRoiRect  = image.Rect(1986+8, 1197+8, 2114-16, 1306-8)
+	roiRect      = origRoiRect
 )
 
 var (
@@ -71,7 +72,6 @@ const matchThreshold = 0.9
 var (
 	captureCost           time.Duration
 	templatesMatchingCost time.Duration
-	drawCost              time.Duration
 )
 
 var (
@@ -102,22 +102,33 @@ func init() {
 	if windowTitle == "" {
 		log.Panic("failed to initialize window name")
 	}
+	window.Option(
+		app.Title(windowTitle),
+		app.MinSize(1280, 720),
+		app.Size(1280, 720),
+	)
 
 	processSelf, err = process.NewProcess(int32(processId))
 	panicIf(err)
 
 	numDisplays := screenshot.NumActiveDisplays()
 	log.Infof("num displays: %d", numDisplays)
-	switch {
-	case numDisplays == 0:
-		log.Panic("display not found")
-	case numDisplays > 1:
-		log.Info("[TODO] multi displays select")
+	var maxBounds image.Rectangle
+	var maxRes int
+	for i := range numDisplays {
+		bounds := screenshot.GetDisplayBounds(i)
+		size := bounds.Size()
+		res := size.X * size.Y
+		if res > maxRes {
+			maxBounds = bounds
+			maxRes = res
+			displayIndex = i
+		}
 	}
+	log.Infof("using display index: %d(%dx%d)", displayIndex, maxBounds.Dx(), maxBounds.Dy())
 
 	capturer, err = capture.New(displayIndex)
 	panicIf(err)
-	log.Infof("display bounds: %dx%d", capturer.Bounds().Dx(), capturer.Bounds().Dy())
 	screenImage = image.NewRGBA(capturer.Bounds())
 
 	err = windows.SetPriorityClass(windows.CurrentProcess(), windows.HIGH_PRIORITY_CLASS)
@@ -126,6 +137,7 @@ func init() {
 	}
 
 	// load template
+	// [TODO] template files runtime watch using [fsnotify.NewWatcher]
 	panicIf(weapons.ReadFrom(templatesDir, 1, ".png", "__"))
 	log.Infof("num templates loaded: %d", len(weapons))
 
@@ -135,19 +147,15 @@ func init() {
 
 func main() {
 	defer func() {
+		capturer.Close()
 		panicIf(weapons.Close())
+		panicIf(luaFile.Close())
 	}()
 
 	wg := sync.WaitGroup{}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ctx, _ = signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
-
-	window.Option(
-		app.Title(windowTitle),
-		app.MinSize(1280, 720),
-		app.Size(1280, 720),
-	)
 
 	wg.Go(func() {
 		cpuMeasureLoop(ctx)
@@ -159,7 +167,13 @@ func main() {
 		windowLoop(ctx, cancel)
 	})
 	wg.Go(func() {
-		captureMatchLoop(ctx)
+		<-ctx.Done()
+		// using ctrl c to exit in console
+		// telling the window on background to response
+		window.Invalidate()
+	})
+	wg.Go(func() {
+		tmplMatchLoop(ctx)
 	})
 
 	wg.Wait()
@@ -254,12 +268,6 @@ func outputLuaLoop(ctx context.Context) {
 	}
 }
 
-var (
-	roiDraggable widget.Draggable
-	roiDragStart image.Rectangle // 拖动开始时ROI的原始位置
-	roiMutex     sync.RWMutex    // 保护roiRect的并发访问
-)
-
 func windowLoop(ctx context.Context, cancel context.CancelFunc) {
 	defer cancel()
 	var ops op.Ops
@@ -288,12 +296,10 @@ func windowLoop(ctx context.Context, cancel context.CancelFunc) {
 				log.Warnf("shortcuts match error: %v", err)
 			}
 
-			tStart := time.Now()
 			if screenImage != nil {
 				layoutDisplay(gtx, screenImage)
 			}
 			layoutGocvInfo(gtx)
-			drawCost = time.Since(tStart)
 
 			e.Frame(gtx.Ops)
 
@@ -305,30 +311,69 @@ func windowLoop(ctx context.Context, cancel context.CancelFunc) {
 	}
 }
 
-func shortcutListWeapons() {
+func shortcutListWeapons(key.Name, key.Modifiers) {
 	for i, tmpl := range weapons {
 		fmt.Printf("[%d] %s %.2f%%\n", i, tmpl.Name, tmpl.Template.MaxVal*100)
 	}
 }
 
-func shortcutPrintProcess() {
+func shortcutPrintProcess(key.Name, key.Modifiers) {
 	windowHandel = windows.GetForegroundWindow()
 	log.Infof("parent process id: %d", parentProcessId)
 	log.Infof("process id: %d", processId)
 	log.Infof("window handel: %#X", windowHandel)
 }
 
-func shortcutResetFreamsElapsed() {
+func shortcutResetFreamsElapsed(key.Name, key.Modifiers) {
 	capturer.FramesElapsed = 0
 	log.Info("capturer.FramesElapsed reset")
 }
 
-func shortcutResetRoi() {
-	draggableRoi.rect = roiRect
-	log.Info("roi reset done")
+var showPosTill time.Time
+
+func shortcutMoveRoiRect(name key.Name, mod key.Modifiers) {
+	offset := 1
+	for range bits.OnesCount32(uint32(mod)) {
+		offset *= 4
+	}
+
+	var newRect image.Rectangle
+
+	switch name {
+	case "R", "r":
+		newRect = origRoiRect
+	case key.NameUpArrow:
+		newRect = roiRect.Sub(image.Pt(0, offset))
+	case key.NameDownArrow:
+		newRect = roiRect.Add(image.Pt(0, offset))
+	case key.NameLeftArrow:
+		newRect = roiRect.Sub(image.Pt(offset, 0))
+	case key.NameRightArrow:
+		newRect = roiRect.Add(image.Pt(offset, 0))
+	}
+
+	boundaryCheck(capturer.Bounds(), &newRect)
+	roiRect = newRect
+	showPosTill = time.Now().Add(time.Second * 3)
+	log.Debugf("roiRect: %v", roiRect)
 }
 
-func shortcutSetWda() {
+func boundaryCheckPos(constraints image.Rectangle, pos *image.Point) {
+	pos.X = max(pos.X, constraints.Min.X)
+	pos.Y = max(pos.Y, constraints.Min.Y)
+	pos.X = min(pos.X, constraints.Max.X)
+	pos.Y = min(pos.Y, constraints.Max.Y)
+}
+
+func boundaryCheck(constraints image.Rectangle, rect *image.Rectangle) {
+	size := rect.Size()
+	boundaryCheckPos(constraints, &rect.Max)
+	rect.Min = rect.Max.Sub(size)
+	boundaryCheckPos(constraints, &rect.Min)
+	rect.Max = rect.Min.Add(size)
+}
+
+func shortcutSetWda(_ key.Name, mod key.Modifiers) {
 	if windowHandel == 0 {
 		windowHandel = windows.GetForegroundWindow()
 	}
@@ -341,11 +386,16 @@ func shortcutSetWda() {
 
 	switch currWda {
 	case WDA_NONE:
-		currWda = WDA_EXCLUDEFROMCAPTURE
-		log.Info("wda set to WDA_EXCLUDEFROMCAPTURE")
-		err = SetWindowDisplayAffinity(windowHandel, WDA_EXCLUDEFROMCAPTURE)
+		var toWda uint32
+		if !mod.Contain(key.ModShift) {
+			toWda = WDA_EXCLUDEFROMCAPTURE
+			log.Info("wda set to WDA_EXCLUDEFROMCAPTURE")
+		} else {
+			toWda = WDA_MONITOR
+			log.Info("wda set to WDA_MONITOR")
+		}
+		err = SetWindowDisplayAffinity(windowHandel, toWda)
 	case WDA_EXCLUDEFROMCAPTURE:
-		currWda = WDA_NONE
 		log.Info("wda set to WDA_NONE")
 		err = SetWindowDisplayAffinity(windowHandel, WDA_NONE)
 	}
@@ -355,7 +405,7 @@ func shortcutSetWda() {
 	}
 }
 
-func captureMatchLoop(ctx context.Context) {
+func tmplMatchLoop(ctx context.Context) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
@@ -380,18 +430,8 @@ func captureMatchLoop(ctx context.Context) {
 			}
 			panicIf(err)
 
-			if draggableRoi.Draggable.Dragging() {
-				continue
-			}
-			currSize := draggableRoi.rect.Size()
-			origSize := roiRect.Size()
-			if currSize.X < origSize.X || currSize.Y < origSize.Y {
-				log.Warnf("draggableRoi.rect < roiRect: %v", currSize)
-				continue
-			}
-
 			// template match
-			captureRoi := capture.Region(draggableRoi.rect)
+			captureRoi := capture.Region(roiRect)
 			tStart = time.Now()
 			weaponIndex, weaponMatched, weaponFound = doMatchWeapon(captureRoi)
 			templatesMatchingCost = time.Since(tStart)

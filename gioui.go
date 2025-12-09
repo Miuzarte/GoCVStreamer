@@ -13,7 +13,6 @@ import (
 	"gioui.org/op"
 	"gioui.org/op/paint"
 	"gioui.org/unit"
-	"gioui.org/widget"
 	"gioui.org/widget/material"
 
 	"github.com/Miuzarte/GoCVStreamer/fps"
@@ -52,24 +51,28 @@ var (
 
 	shortcuts = widgets.NewShortcuts(&window,
 		widgets.Shortcut{
-			Key: widgets.NewShortcut(0, 0, key.NameSpace),
-			F:   shortcutListWeapons,
+			Keys: []key.Name{key.NameSpace},
+			F:    shortcutListWeapons,
 		},
 		widgets.Shortcut{
-			Key: widgets.NewShortcut(0, 0, "P", "p"),
-			F:   shortcutPrintProcess,
+			Keys: []key.Name{"P", "p"},
+			F:    shortcutPrintProcess,
 		},
 		widgets.Shortcut{
-			Key: widgets.NewShortcut(0, 0, "F", "f"),
-			F:   shortcutResetFreamsElapsed,
+			Keys: []key.Name{"F", "f"},
+			F:    shortcutResetFreamsElapsed,
 		},
 		widgets.Shortcut{
-			Key: widgets.NewShortcut(0, 0, "R", "r"),
-			F:   shortcutResetRoi,
+			Keys: []key.Name{
+				"R", "r",
+				key.NameUpArrow, key.NameDownArrow,
+				key.NameLeftArrow, key.NameRightArrow,
+			},
+			F: shortcutMoveRoiRect,
 		},
 		widgets.Shortcut{
-			Key: widgets.NewShortcut(0, 0, "T", "t"),
-			F:   shortcutSetWda,
+			Keys: []key.Name{"T", "t"},
+			F:    shortcutSetWda,
 		},
 	)
 )
@@ -115,11 +118,10 @@ var (
 func layoutGocvInfo(gtx layout.Context) {
 	const ms = float64(time.Millisecond)
 	status := fmt.Sprintf(
-		"| FPS: %.2f | 截图: %.1fms | %d | 绘制: %.1fms |\n| CPU: %.1f%% | 匹配: %.1fms/%d=%.2fms |",
+		"| FPS: %05.2f | 截图: %.1fms | 0x%.4X |\n| CPU: %04.1f%% | 匹配: %.1fms/%d=%.2fms |",
 		cvFps.Count(),
 		float64(captureCost)/ms,
 		capturer.FramesElapsed,
-		float64(drawCost)/ms,
 
 		cpu,
 		float64(templatesMatchingCost)/ms, weaponMatched,
@@ -127,26 +129,24 @@ func layoutGocvInfo(gtx layout.Context) {
 	)
 	widgets.Label(fontSize*1.5, status).Layout(gtx)
 
-	draggableRoi.Layout(gtx)
-
 	roiRectScaled := scaleRect(
 		capturer.Bounds().Max, gtx.Constraints.Max,
-		draggableRoi.rect,
+		roiRect,
 	)
 	layoutRectAbsPos(gtx, color.NRGBA(colorCoral), roiRectScaled)
 
 	labelPosScaled := scalePos(
 		capturer.Bounds().Max, gtx.Constraints.Max,
 		image.Pt(
-			draggableRoi.rect.Min.X,
-			draggableRoi.rect.Min.Y-(fontSize*2.5),
+			roiRect.Min.X,
+			roiRect.Min.Y,
 		),
 	)
-	if !draggableRoi.Dragging() {
-		layoutLabelAbsPos(gtx, color.NRGBA(colorCoral), labelPosScaled, fontSize, "ROI")
+	labelPosScaled.Y -= fontSize * 1.25
+	if time.Now().Before(showPosTill) {
+		layoutLabelAbsPos(gtx, color.NRGBA(colorCoral), labelPosScaled, fontSize, fmt.Sprint(roiRect))
 	} else {
-		layoutLabelAbsPos(gtx, color.NRGBA(colorCoral), labelPosScaled, fontSize, fmt.Sprint(draggableRoi.rect.Min))
-		layoutLabelAbsPos(gtx, color.NRGBA(colorCoral), labelPosScaled.Add(roiRectScaled.Size()), fontSize, fmt.Sprint(draggableRoi.rect.Max))
+		layoutLabelAbsPos(gtx, color.NRGBA(colorCoral), labelPosScaled, fontSize, "ROI")
 	}
 
 	colorPos := colorGreen
@@ -166,8 +166,8 @@ func layoutGocvInfo(gtx layout.Context) {
 		tmplPosPos := scalePos(
 			capturer.Bounds().Max, gtx.Constraints.Max,
 			image.Pt(
-				draggableRoi.rect.Min.X, // 与ROI左对齐
-				draggableRoi.rect.Max.Y,
+				roiRect.Min.X, // 与ROI左对齐
+				roiRect.Max.Y,
 			),
 		)
 		tmplPosPos.Y += borderThickness / 2
@@ -198,7 +198,7 @@ func layoutResultRect(gtx layout.Context, color color.NRGBA, tmpl *template.Temp
 			tmpl.MaxLoc.Y,
 			tmpl.MaxLoc.X+tmpl.Width,
 			tmpl.MaxLoc.Y+tmpl.Height,
-		).Add(draggableRoi.rect.Min),
+		).Add(roiRect.Min),
 	)
 	return layoutRectAbsPos(gtx, color, rect)
 }
@@ -209,61 +209,4 @@ func layoutTextRight(gtx layout.Context, color color.NRGBA, roiRect image.Rectan
 		roiRect.Min.Y+2-0.5*fontSize+line*fontSize,
 	)
 	return layoutLabelAbsPos(gtx, color, pos, fontSize, txt)
-}
-
-type DraggableRoi struct {
-	widget.Draggable
-	rect      image.Rectangle
-	dragStart image.Rectangle
-	printPos  bool
-}
-
-func (d *DraggableRoi) Layout(gtx layout.Context) layout.Dimensions {
-	d.Draggable.Update(gtx)
-
-	if d.Draggable.Dragging() {
-		pos := d.Draggable.Pos()
-
-		if pos.X == 0 && pos.Y == 0 {
-			d.dragStart = d.rect
-		} else {
-			newRect := d.dragStart.Add(image.Pt(int(pos.X), int(pos.Y)))
-
-			bounds := capturer.Bounds()
-			if newRect.Min.X < bounds.Min.X {
-				diff := bounds.Min.X - newRect.Min.X
-				newRect = newRect.Add(image.Pt(diff, 0))
-			}
-			if newRect.Min.Y < bounds.Min.Y {
-				diff := bounds.Min.Y - newRect.Min.Y
-				newRect = newRect.Add(image.Pt(0, diff))
-			}
-			if newRect.Max.X > bounds.Max.X {
-				diff := newRect.Max.X - bounds.Max.X
-				newRect = newRect.Add(image.Pt(-diff, 0))
-			}
-			if newRect.Max.Y > bounds.Max.Y {
-				diff := newRect.Max.Y - bounds.Max.Y
-				newRect = newRect.Add(image.Pt(0, -diff))
-			}
-
-			d.rect = newRect
-			d.printPos = true
-		}
-
-	} else if d.printPos {
-		// 松开打印一次
-		d.printPos = false
-		log.Infof("current roi region: %v", d.rect)
-
-	}
-
-	roiRectScaled := scaleRect(
-		capturer.Bounds().Max, gtx.Constraints.Max,
-		d.rect,
-	)
-	defer op.Offset(roiRectScaled.Min).Push(gtx.Ops).Pop()
-	return d.Draggable.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		return layout.Dimensions{Size: roiRectScaled.Size()}
-	}, nil)
 }

@@ -9,29 +9,15 @@ import (
 	"gioui.org/op/clip"
 )
 
-type filter struct {
-	Required key.Modifiers
-	Optional key.Modifiers
-	names    []key.Name
-}
-
 type Shortcut struct {
-	Key filter
-	F   func()
+	Keys []key.Name
+	F    func(key.Name, key.Modifiers)
 }
 
 type Shortcuts struct {
 	receiver     any
 	eventFilters []event.Filter
 	shortcuts    map[key.Name]Shortcut
-}
-
-func NewShortcut(required, optional key.Modifiers, names ...key.Name) filter {
-	return filter{
-		Required: required,
-		Optional: optional,
-		names:    names,
-	}
 }
 
 // NewShortcuts does not allow multiple identical non-modifying keys
@@ -45,14 +31,18 @@ func NewShortcuts(receiver any, shortcuts ...Shortcut) (ss Shortcuts) {
 	ss.eventFilters = []event.Filter{}
 	ss.shortcuts = make(map[key.Name]Shortcut, len(shortcuts))
 	for _, s := range shortcuts {
-		for _, keyName := range s.Key.names {
+		for _, keyName := range s.Keys {
 			ss.eventFilters = append(ss.eventFilters,
 				key.Filter{
-					Required: s.Key.Required,
-					Optional: s.Key.Optional,
-					Name:     keyName,
+					Optional: key.ModCtrl |
+						key.ModCommand |
+						key.ModShift |
+						key.ModAlt |
+						key.ModSuper,
+					Name: keyName,
 				},
 			)
+
 			if _, ok := ss.shortcuts[keyName]; ok {
 				panic(fmt.Errorf("repeated key: %s", keyName))
 			}
@@ -82,9 +72,7 @@ func (ss *Shortcuts) Match(gtx layout.Context) error {
 			if !ok {
 				continue
 			}
-			if e.Modifiers.Contain(shortcut.Key.Required) {
-				shortcut.F()
-			}
+			shortcut.F(e.Name, e.Modifiers)
 
 		default:
 			return fmt.Errorf("unknown key event[%T]: %v", event, event)
