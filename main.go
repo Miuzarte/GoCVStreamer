@@ -11,17 +11,20 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"gioui.org/app"
 	"gioui.org/io/key"
 	"gioui.org/op"
 
 	"github.com/Miuzarte/GoCVStreamer/capture"
+	"github.com/fsnotify/fsnotify"
 
 	"github.com/Miuzarte/SimpleLog"
 	"github.com/kbinani/screenshot"
@@ -38,7 +41,9 @@ const (
 )
 
 const (
-	TEMPLATES_DIRECTORY = "templates"
+	TEMPLATES_DIRECTORY     = "templates"
+	TEMPLATES_SUFFIX        = ".png"
+	TEMPLATES_PREFIX_IGNORE = "__"
 )
 
 var log = SimpleLog.New("[Streamer]", true, false).SetLevel(SimpleLog.DebugLevel)
@@ -53,7 +58,7 @@ var (
 )
 
 var (
-	displayIndex = 0 // [TODO] 自动取分辨率最高的屏幕
+	displayIndex = 0
 	capturer     *capture.Capturer
 	screenImage  *image.RGBA
 	origRoiRect  = image.Rect(1986+8, 1197+8, 2114-16, 1306-8)
@@ -152,12 +157,11 @@ func loadTemplates() {
 	weaponsMu.Lock()
 	defer weaponsMu.Unlock()
 
-	// [TODO] single template file watch and reload using [fsnotify.NewWatcher] at runtime
 	tStart := time.Now()
 	if len(weapons) != 0 {
 		panicIf(weapons.Close())
 	}
-	panicIf(weapons.ReadFrom(TEMPLATES_DIRECTORY, 1, ".png", "__"))
+	panicIf(weapons.ReadFrom(TEMPLATES_DIRECTORY, 1, TEMPLATES_SUFFIX, TEMPLATES_PREFIX_IGNORE))
 	log.Infof("%d template(s) loaded cost %s", len(weapons), time.Since(tStart))
 }
 
@@ -190,6 +194,9 @@ func main() {
 		// using ctrl c to exit in console
 		// telling the window on background to response
 		window.Invalidate()
+	})
+	wg.Go(func() {
+		tmplWatchLoop(ctx)
 	})
 	wg.Go(func() {
 		tmplMatchLoop(ctx)
@@ -377,7 +384,9 @@ func shortcutListWeapons(key.Name, key.Modifiers) {
 	defer weaponsMu.RUnlock()
 
 	for i, tmpl := range weapons {
-		fmt.Printf("[%d] %s %.2f%%\n", i, tmpl.Name, tmpl.Template.MaxVal*100)
+		fmt.Printf("[%d] {%s_%s_%s}%s %.2f%%\n", i,
+			tmpl.Mode.string(true), tmpl.SpeedAcog, tmpl.Speed1x, tmpl.Name,
+			tmpl.Template.MaxVal*100)
 	}
 }
 
@@ -482,6 +491,184 @@ func shortcutSetWda(_ key.Name, mod key.Modifiers) {
 	}
 }
 
+func tmplWatchLoop(ctx context.Context) {
+	type myFsEvent struct {
+		Name        string
+		Op          fsnotify.Op
+		renamedFrom string
+	}
+	if unsafe.Sizeof(myFsEvent{}) != unsafe.Sizeof(fsnotify.Event{}) ||
+		reflect.TypeOf(myFsEvent{}).NumField() != reflect.TypeOf(fsnotify.Event{}).NumField() {
+		log.Panic("[FIXME] define of fsnotify.Event has been changed")
+	}
+
+	watcher, err := fsnotify.NewWatcher()
+	panicIf(err)
+	defer watcher.Close()
+	panicIf(watcher.Add(TEMPLATES_DIRECTORY))
+
+	// wrap mutex with closures
+	muDelWeapon := func(event fsnotify.Event) (int, error) {
+		weaponsMu.Lock()
+		defer weaponsMu.Unlock()
+
+		n, err := weapons.DeleteByPath(event.Name)
+		if err != nil {
+			return n, fmt.Errorf("failed to delete weapon %q: %w", event.Name, err)
+		}
+		return n, nil
+	}
+
+	muAddWeapon := func(event fsnotify.Event) error {
+		weaponsMu.Lock()
+		defer weaponsMu.Unlock()
+
+		time.Sleep(time.Millisecond * 100) // simply wait for the end of writing
+		err := weapons.Append(event.Name)
+		if err != nil {
+			return fmt.Errorf("failed to add new weapon %q: %w", event.Name, err)
+		}
+		return nil
+	}
+
+	muModWeapon := func(event fsnotify.Event) error {
+		weaponsMu.Lock()
+		defer weaponsMu.Unlock()
+
+		renameFrom := (*myFsEvent)(unsafe.Pointer(&event)).renamedFrom
+
+		if strings.HasPrefix(event.Name, TEMPLATES_PREFIX_IGNORE) {
+			return nil
+		}
+
+		origI := -1
+		origName, _, err := parseFileName(renameFrom)
+		if err == nil {
+			origI = weapons.IndexByName(origName)
+			// } else {
+			// 	ignore
+		}
+
+		if origI < 0 {
+			// load the new one
+			err := weapons.Append(event.Name)
+			if err != nil {
+				return fmt.Errorf("failed to add new weapon %q: %w", event.Name, err)
+			}
+		} else {
+			// modify
+			name, params, err := parseFileName(event.Name)
+			if err != nil {
+				return fmt.Errorf("failed to parse file %q to modify: %w", name, err)
+			}
+			if strings.HasPrefix(filepath.Base(event.Name), TEMPLATES_PREFIX_IGNORE) {
+				// delete
+				_, err := weapons.DeleteByName(name)
+				if err != nil {
+					return fmt.Errorf("failed to delete %q: %w", name, err)
+				}
+				return nil
+			}
+
+			if name != origName {
+				// wried
+				log.Warnf("weapon %q name was changed to %q", origName, name)
+			}
+
+			w := weapons[origI]
+			switch params[0] {
+			case "FA":
+				w.Mode = WEAPON_MODE_FULL_AUTO
+			case "SA":
+				w.Mode = WEAPON_MODE_SEMI_AUTO
+			default:
+				return fmt.Errorf("invalid file params mode: %s", params[0])
+			}
+			w.Path = event.Name
+			w.Name = name
+			w.SpeedAcog = params[1]
+			w.Speed1x = params[2]
+		}
+
+		return nil
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+
+		case event, ok := <-watcher.Events:
+			if !ok {
+				return
+			}
+
+			log.Debugf("fs event: %s", event)
+
+			/*
+				[14:13:57.771]CREATE        "templates\\config.ini"
+				[14:13:57.771]WRITE         "templates\\config.ini"
+				[14:13:57.771]WRITE         "templates\\config.ini"
+
+				[14:14:44.191]RENAME        "templates\\config.ini"
+				[14:14:44.191]CREATE        "templates\\config__.ini" ← "templates\\config.ini"
+
+				[14:16:47.031]REMOVE        "templates\\config__.ini"
+			*/
+			switch event.Op {
+			// case fsnotify.Rename:
+			// handled in next fsCreate signal
+
+			case fsnotify.Create:
+				var err error
+				renameFrom := (*myFsEvent)(unsafe.Pointer(&event)).renamedFrom
+
+				if renameFrom == "" {
+					// is fsCreate
+					err = muAddWeapon(event)
+				} else {
+					// is fsRename
+					err = muModWeapon(event)
+				}
+				if err != nil {
+					log.Warn(err)
+					continue
+				}
+
+				if renameFrom == "" {
+					log.Infof("weapon %q added successfully", event.Name)
+				} else {
+					log.Infof("weapon %q modified successfully", event.Name)
+				}
+
+			case fsnotify.Remove:
+				deleted, err := muDelWeapon(event)
+				if err != nil {
+					log.Warn(err)
+					continue
+				}
+
+				switch deleted {
+				case 1:
+					log.Infof("weapon %q deleted successfully", event.Name)
+				case 0:
+					log.Warnf("weapon %q failed to delete", event.Name)
+				default:
+					log.Warnf("weapon %q triggered multiple weapons deletion: %d", event.Name, deleted)
+				}
+
+			}
+
+		case err, ok := <-watcher.Errors:
+			if !ok {
+				return
+			}
+			log.Errorf("fsnotify error: %v", err)
+
+		}
+	}
+}
+
 func tmplMatchLoop(ctx context.Context) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
@@ -497,7 +684,11 @@ func tmplMatchLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 
-		case <-ticker.C:
+		case _, ok := <-ticker.C:
+			if !ok {
+				return
+			}
+
 			// screenshot
 			tStart := time.Now()
 			err := doScreenshot(screenImage, &capture)

@@ -5,6 +5,7 @@ go 1.25
 require (
 	gioui.org v0.9.0
 	github.com/Miuzarte/SimpleLog v0.0.0-20250219043509-00d060590f0d
+	github.com/fsnotify/fsnotify v1.9.0
 	github.com/kbinani/screenshot v0.0.0-20250624051815-089614a94018
 	github.com/kirides/go-d3d v1.0.1
 	github.com/shirou/gopsutil/v4 v4.25.11
