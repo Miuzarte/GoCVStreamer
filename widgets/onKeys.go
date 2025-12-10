@@ -20,6 +20,13 @@ type Shortcuts struct {
 	shortcuts    map[key.Name]Shortcut
 }
 
+func NewShortcut(f func(key.Name, key.Modifiers), keys ...key.Name) Shortcut {
+	return Shortcut{
+		Keys: keys,
+		F:    f,
+	}
+}
+
 // NewShortcuts does not allow multiple identical non-modifying keys
 // cause it uses map for matching internally.
 func NewShortcuts(receiver any, shortcuts ...Shortcut) (ss Shortcuts) {

@@ -31,8 +31,7 @@ func SetWindowDisplayAffinity(hWnd windows.HWND, dwAffinity uint32) error {
 	return nil
 }
 
-func GetWindowDisplayAffinity(hWnd windows.HWND) (uint32, error) {
-	var dwAffinity uint32
+func GetWindowDisplayAffinity(hWnd windows.HWND) (dwAffinity uint32, _ error) {
 	ret, _, err := procGetWindowDisplayAffinity.Call(
 		uintptr(hWnd),
 		uintptr(unsafe.Pointer(&dwAffinity)),

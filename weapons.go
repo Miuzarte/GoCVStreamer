@@ -47,7 +47,9 @@ func (ws *Weapons) ReadFrom(dir string, depth int, suffix string, withoutPrefix 
 		return fmt.Errorf("failed to walk %s: %w", suffix, err)
 	}
 
-	*ws = make(Weapons, 0, len(paths))
+	if cap(*ws) < len(paths) {
+		*ws = make(Weapons, 0, len(paths))
+	}
 	for i, path := range paths {
 		w := &Weapon{}
 
@@ -103,11 +105,15 @@ func (ws *Weapons) MinMaxIndex() (min, max int) {
 }
 
 func (ws *Weapons) Close() (err error) {
-	for _, w := range *ws {
-		err = w.Template.Close()
+	for i := len(*ws) - 1; i >= 0; i-- {
+		err = (*ws)[i].Template.Close()
 		if err != nil {
 			return
 		}
+		*ws = (*ws)[:i]
+	}
+	if len(*ws) != 0 {
+		panic("unreachable")
 	}
 	return
 }

@@ -61,6 +61,7 @@ var (
 )
 
 var (
+	weaponsMu     sync.RWMutex
 	weapons       Weapons
 	weaponIndex   int
 	weaponMatched = 1
@@ -141,17 +142,30 @@ func init() {
 		log.Warnf("failed to set process priority: %v", err)
 	}
 
-	// load template
-	// [TODO] template files runtime watch using [fsnotify.NewWatcher]
-	panicIf(weapons.ReadFrom(TEMPLATES_DIRECTORY, 1, ".png", "__"))
-	log.Infof("num templates loaded: %d", len(weapons))
+	loadTemplates()
 
 	luaFile, err = os.OpenFile("speed.lua", os.O_WRONLY|os.O_CREATE, 0o664)
 	panicIf(err)
 }
 
+func loadTemplates() {
+	weaponsMu.Lock()
+	defer weaponsMu.Unlock()
+
+	// [TODO] single template file watch and reload using [fsnotify.NewWatcher] at runtime
+	tStart := time.Now()
+	if len(weapons) != 0 {
+		panicIf(weapons.Close())
+	}
+	panicIf(weapons.ReadFrom(TEMPLATES_DIRECTORY, 1, ".png", "__"))
+	log.Infof("%d template(s) loaded cost %s", len(weapons), time.Since(tStart))
+}
+
 func main() {
 	defer func() {
+		weaponsMu.Lock()
+		defer weaponsMu.Unlock()
+
 		capturer.Close()
 		panicIf(weapons.Close())
 		panicIf(luaFile.Close())
@@ -202,103 +216,113 @@ func luaSwitchingLoop(ctx context.Context) {
 	// more for template matching loop delay
 	const debounceInterval = time.Millisecond * 1500
 
+	writeLua := func(newIndex int) {
+		weaponsMu.RLock()
+		defer weaponsMu.RUnlock()
+
+		if newIndex == luaFileIndex {
+			return
+		}
+
+		if MATCHING_MISJUDGEMENT_ALERT &&
+			luaFileIndexTodo >= 0 && newIndex >= 0 {
+			os.Stderr.Write([]byte{'\a'})
+		}
+
+		if luaFileIndex >= 0 && newIndex == WEAPON_INDEX_NONE {
+			// from notnone to none
+			if luaFileIndexTodo != WEAPON_INDEX_NONE {
+				// going to none, enter debounce
+				luaFileIndexTodo = WEAPON_INDEX_NONE
+				lastSwitchToNone = time.Now()
+				return
+			} else {
+				// debounce skipping
+				timeToNone := lastSwitchToNone.Add(debounceInterval)
+				if time.Now().Before(timeToNone) {
+					log.Debug("switching skipped due to debounce")
+					return
+				}
+			}
+		} else {
+			luaFileIndexTodo = newIndex
+		}
+
+		var from *Weapon
+		var to *Weapon
+		if luaFileIndex >= 0 {
+			from = weapons[luaFileIndex]
+			fromName := from.Name
+			toName := "N/A"
+			if luaFileIndexTodo >= 0 {
+				to = weapons[luaFileIndexTodo]
+				toName = to.Name
+			}
+			log.Debugf(
+				"switch from %d(%s) to %d(%s), last maxVal: %.2f%%",
+				luaFileIndex, fromName,
+				luaFileIndexTodo, toName,
+				from.Template.MaxVal*100,
+			)
+		}
+		luaFileIndex = luaFileIndexTodo
+
+		err := luaFile.Truncate(0)
+		if err != nil {
+			log.Warnf("luaFile failed to Truncate: %v", err)
+			return
+		}
+		_, err = luaFile.Seek(0, io.SeekStart)
+		if err != nil {
+			log.Warnf("luaFile failed to Seek: %v", err)
+			return
+		}
+
+		const defaultContent = "FAA=0\nFA1=0\nSAA=0\nSA1=0"
+		var content string
+		switch {
+		case luaFileIndex == WEAPON_INDEX_NONE:
+			content = defaultContent
+
+		case luaFileIndex < 0:
+			log.Panicf("unreachable: %d", luaFileIndex)
+
+		default:
+			switch to.Mode {
+			case WEAPON_MODE_FULL_AUTO:
+				content = "FAA=" + to.SpeedAcog +
+					"\n" + "FA1=" + to.Speed1x +
+					"\n" + "SAA=0" + "\n" + "SA1=0"
+			case WEAPON_MODE_SEMI_AUTO:
+				content = "FAA=0" + "\n" + "FA1=0" +
+					"\n" + "SAA=" + to.SpeedAcog +
+					"\n" + "SA1=" + to.Speed1x
+			default:
+				log.Warnf("unexpected tmpl.Mode: %s", to.Mode)
+				content = defaultContent
+			}
+		}
+
+		_, err = luaFile.WriteString(content)
+		if err != nil {
+			log.Warnf("luaFile failed to WriteString: %v", err)
+			return
+		}
+		err = luaFile.Sync()
+		if err != nil {
+			log.Warnf("luaFile failed to Sync: %v", err)
+			return
+		}
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 
 		case newIndex := <-weaponIndexSignal:
-			if newIndex == luaFileIndex {
-				continue
-			}
-
-			if MATCHING_MISJUDGEMENT_ALERT &&
-				luaFileIndexTodo >= 0 && newIndex >= 0 {
-				os.Stderr.Write([]byte{'\a'})
-			}
-
-			if luaFileIndex >= 0 && newIndex == WEAPON_INDEX_NONE {
-				// from notnone to none
-				if luaFileIndexTodo != WEAPON_INDEX_NONE {
-					// going to none, enter debounce
-					luaFileIndexTodo = WEAPON_INDEX_NONE
-					lastSwitchToNone = time.Now()
-					continue
-				} else {
-					// debounce skipping
-					timeToNone := lastSwitchToNone.Add(debounceInterval)
-					if time.Now().Before(timeToNone) {
-						log.Debug("switching skipped due to debounce")
-						continue
-					}
-				}
-			} else {
-				luaFileIndexTodo = newIndex
-			}
-
-			if luaFileIndex >= 0 {
-				from := weapons[luaFileIndex]
-				toName := "N/A"
-				if luaFileIndexTodo >= 0 {
-					toName = weapons[luaFileIndexTodo].Name
-				}
-				log.Debugf(
-					"switch from %d(%s) to %d(%s), last maxVal: %.2f%%",
-					luaFileIndex, from.Name,
-					luaFileIndexTodo, toName,
-					from.Template.MaxVal*100,
-				)
-			}
-			luaFileIndex = luaFileIndexTodo
-
-			err := luaFile.Truncate(0)
-			if err != nil {
-				log.Warnf("luaFile failed to Truncate: %v", err)
-				continue
-			}
-			_, err = luaFile.Seek(0, io.SeekStart)
-			if err != nil {
-				log.Warnf("luaFile failed to Seek: %v", err)
-				continue
-			}
-
-			var content string
-			switch {
-			case luaFileIndexTodo == WEAPON_INDEX_NONE:
-				content = "FAA=0\nFA1=0\nSAA=0\nSA1=0"
-
-			case luaFileIndexTodo < 0:
-				log.Panicf("unreachable: %d", luaFileIndexTodo)
-
-			default:
-				weapon := weapons[luaFileIndexTodo]
-				switch weapon.Mode {
-				case WEAPON_MODE_FULL_AUTO:
-					content = "FAA=" + weapon.SpeedAcog +
-						"\n" + "FA1=" + weapon.Speed1x +
-						"\n" + "SAA=0" + "\n" + "SA1=0"
-				case WEAPON_MODE_SEMI_AUTO:
-					content = "FAA=0" + "\n" + "FA1=0" +
-						"\n" + "SAA=" + weapon.SpeedAcog +
-						"\n" + "SA1=" + weapon.Speed1x
-				default:
-					log.Warnf("unexpected tmpl.Mode: %s", weapon.Mode)
-					content = "FAA=0" + "\n" + "FA1=0" +
-						"\n" + "SAA=0" + "\n" + "SA1=0"
-				}
-			}
-
-			_, err = luaFile.WriteString(content)
-			if err != nil {
-				log.Warnf("luaFile failed to WriteString: %v", err)
-				continue
-			}
-			err = luaFile.Sync()
-			if err != nil {
-				log.Warnf("luaFile failed to Sync: %v", err)
-				continue
-			}
-
+			// using closure for mutex control
+			writeLua(newIndex)
 		}
 	}
 }
@@ -349,8 +373,18 @@ func windowLoop(ctx context.Context, cancel context.CancelFunc) {
 }
 
 func shortcutListWeapons(key.Name, key.Modifiers) {
+	weaponsMu.RLock()
+	defer weaponsMu.RUnlock()
+
 	for i, tmpl := range weapons {
 		fmt.Printf("[%d] %s %.2f%%\n", i, tmpl.Name, tmpl.Template.MaxVal*100)
+	}
+}
+
+// Deprecated: there is a slight memory leak
+func shortcutReloadWeapons(_ key.Name, mod key.Modifiers) {
+	if mod.Contain(key.ModCtrl | key.ModShift) {
+		loadTemplates()
 	}
 }
 
@@ -543,6 +577,9 @@ func doScreenshot(screenImage *image.RGBA, display *gocv.Mat) error {
 var lastSuccessfulTempl int
 
 func doMatchWeapon(captureRoi gocv.Mat) (templateIndex, templateMatched int, found bool) {
+	weaponsMu.RLock()
+	defer weaponsMu.RUnlock()
+
 	const method = gocv.TmCcoeffNormed
 
 	for j := range weapons {

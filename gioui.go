@@ -50,34 +50,15 @@ var (
 	mTheme = material.NewTheme()
 
 	shortcuts = widgets.NewShortcuts(&window,
-		widgets.Shortcut{
-			Keys: []key.Name{key.NameSpace},
-			F:    shortcutListWeapons,
-		},
-		widgets.Shortcut{
-			Keys: []key.Name{"P", "p"},
-			F:    shortcutPrintProcess,
-		},
-		widgets.Shortcut{
-			Keys: []key.Name{"F", "f"},
-			F:    shortcutResetFreamsElapsed,
-		},
-		widgets.Shortcut{
-			Keys: []key.Name{"D", "d"},
-			F:    shortcutToggleDraw,
-		},
-		widgets.Shortcut{
-			Keys: []key.Name{
-				"R", "r",
-				key.NameUpArrow, key.NameDownArrow,
-				key.NameLeftArrow, key.NameRightArrow,
-			},
-			F: shortcutMoveRoiRect,
-		},
-		widgets.Shortcut{
-			Keys: []key.Name{"T", "t"},
-			F:    shortcutSetWda,
-		},
+		widgets.NewShortcut(shortcutListWeapons, key.NameSpace),
+		widgets.NewShortcut(shortcutReloadWeapons, "W", "w"),
+		widgets.NewShortcut(shortcutPrintProcess, "P", "p"),
+		widgets.NewShortcut(shortcutResetFreamsElapsed, "F", "f"),
+		widgets.NewShortcut(shortcutToggleDraw, "D", "d"),
+		widgets.NewShortcut(shortcutMoveRoiRect, "R", "r",
+			key.NameUpArrow, key.NameDownArrow,
+			key.NameLeftArrow, key.NameRightArrow),
+		widgets.NewShortcut(shortcutSetWda, "T", "t"),
 	)
 )
 
@@ -120,6 +101,9 @@ var (
 )
 
 func layoutGocvInfo(gtx layout.Context) {
+	weaponsMu.RLock()
+	defer weaponsMu.RUnlock()
+
 	const ms = float64(time.Millisecond)
 	status := fmt.Sprintf(
 		"| FPS: %05.2f | 截图: %.1fms | 0x%.4X |\n| CPU: %04.1f%% | 匹配: %.1fms/%d=%.2fms |",
