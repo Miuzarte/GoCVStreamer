@@ -9,7 +9,7 @@ import (
 	"github.com/Miuzarte/GoCVStreamer/template"
 )
 
-const createMask = false
+const CREATE_MASK = false
 
 type WeaponMode int
 
@@ -78,7 +78,7 @@ func (ws *Weapons) ReadFrom(dir string, depth int, suffix string, withoutPrefix 
 		w.SpeedAcog = params[1]
 		w.Speed1x = params[2]
 
-		err = w.Template.IMReadFrom(path, createMask)
+		err = w.Template.IMReadFrom(path, CREATE_MASK)
 		if err != nil {
 			return fmt.Errorf("weapon [%d]%s failed to IMRead: %w", i, w.Name, err)
 		}

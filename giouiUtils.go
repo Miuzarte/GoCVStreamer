@@ -59,7 +59,7 @@ func scaleRect(orig, curr image.Point, rect image.Rectangle) image.Rectangle {
 func layoutRectAbsPos(gtx layout.Context, color color.NRGBA, rect image.Rectangle) layout.Dimensions {
 	defer op.Offset(rect.Min).Push(gtx.Ops).Pop()
 	box := widgets.NewBox()
-	box.Thickness = borderThickness
+	box.Thickness = BORDER_THICKNESS
 	box.BorderColor = color
 	box.Border = true
 	return box.Layout(gtx, func(gtx layout.Context) layout.Dimensions {

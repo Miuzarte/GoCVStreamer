@@ -21,8 +21,8 @@ import (
 )
 
 const (
-	fontSize        = 16
-	borderThickness = 2
+	FONT_SIZE        = 16
+	BORDER_THICKNESS = 2
 )
 
 type rgba struct {
@@ -61,6 +61,10 @@ var (
 		widgets.Shortcut{
 			Keys: []key.Name{"F", "f"},
 			F:    shortcutResetFreamsElapsed,
+		},
+		widgets.Shortcut{
+			Keys: []key.Name{"D", "d"},
+			F:    shortcutToggleDraw,
 		},
 		widgets.Shortcut{
 			Keys: []key.Name{
@@ -127,7 +131,7 @@ func layoutGocvInfo(gtx layout.Context) {
 		float64(templatesMatchingCost)/ms, weaponMatched,
 		float64(templatesMatchingCost)/float64(weaponMatched)/ms,
 	)
-	widgets.Label(fontSize*1.5, status).Layout(gtx)
+	widgets.Label(FONT_SIZE*1.5, status).Layout(gtx)
 
 	roiRectScaled := scaleRect(
 		capturer.Bounds().Max, gtx.Constraints.Max,
@@ -142,11 +146,11 @@ func layoutGocvInfo(gtx layout.Context) {
 			roiRect.Min.Y,
 		),
 	)
-	labelPosScaled.Y -= fontSize * 1.25
+	labelPosScaled.Y -= FONT_SIZE * 1.25
 	if time.Now().Before(showPosTill) {
-		layoutLabelAbsPos(gtx, color.NRGBA(colorCoral), labelPosScaled, fontSize, fmt.Sprint(roiRect))
+		layoutLabelAbsPos(gtx, color.NRGBA(colorCoral), labelPosScaled, FONT_SIZE, fmt.Sprint(roiRect))
 	} else {
-		layoutLabelAbsPos(gtx, color.NRGBA(colorCoral), labelPosScaled, fontSize, "ROI")
+		layoutLabelAbsPos(gtx, color.NRGBA(colorCoral), labelPosScaled, FONT_SIZE, "ROI")
 	}
 
 	colorPos := colorGreen
@@ -170,13 +174,13 @@ func layoutGocvInfo(gtx layout.Context) {
 				roiRect.Max.Y,
 			),
 		)
-		tmplPosPos.Y += borderThickness / 2
+		tmplPosPos.Y += BORDER_THICKNESS / 2
 		layoutImageAbsPos(gtx, tmplPosPos, weaponPos.Template.Raw) // 匹配的模板本身
 		layoutResultRect(gtx, color.NRGBA(colorPos), &weaponPos.Template)
 		layoutTextRight(gtx, color.NRGBA(colorPos), roiRectScaled, 0, weaponPos.Name)
 		layoutTextRight(gtx, color.NRGBA(colorPos), roiRectScaled, 1, fmt.Sprintf("%.2f%%", weaponPos.Template.MaxVal*100))
 
-		if drawNeg {
+		if DRAW_NEGATIVE_RESULT {
 			tmplNegPos := image.Pt(
 				tmplPosPos.X,
 				tmplPosPos.Y+weaponPos.Template.Height,
@@ -205,8 +209,8 @@ func layoutResultRect(gtx layout.Context, color color.NRGBA, tmpl *template.Temp
 
 func layoutTextRight(gtx layout.Context, color color.NRGBA, roiRect image.Rectangle, line int, txt string) layout.Dimensions {
 	pos := image.Pt(
-		roiRect.Max.X+fontSize/4,
-		roiRect.Min.Y+2-0.5*fontSize+line*fontSize,
+		roiRect.Max.X+FONT_SIZE/4,
+		roiRect.Min.Y+2-0.5*FONT_SIZE+line*FONT_SIZE,
 	)
-	return layoutLabelAbsPos(gtx, color, pos, fontSize, txt)
+	return layoutLabelAbsPos(gtx, color, pos, FONT_SIZE, txt)
 }

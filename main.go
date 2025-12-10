@@ -32,12 +32,13 @@ import (
 )
 
 const (
-	debug   = false
-	drawNeg = false
+	DEBUG                       = false
+	DRAW_NEGATIVE_RESULT        = false
+	MATCHING_MISJUDGEMENT_ALERT = false
 )
 
 const (
-	templatesDir = "templates"
+	TEMPLATES_DIRECTORY = "templates"
 )
 
 var log = SimpleLog.New("[Streamer]", true, false).SetLevel(SimpleLog.DebugLevel)
@@ -66,8 +67,10 @@ var (
 	weaponFound   bool
 )
 
+const WEAPON_INDEX_NONE = -1
+
 // [TODO]? dynamic threshold
-const matchThreshold = 0.9
+const MATCH_THRESHOLD = 0.9
 
 var (
 	captureCost           time.Duration
@@ -75,15 +78,17 @@ var (
 )
 
 var (
-	luaFile      *os.File
-	luaFileIndex = -1
-	outputSignal = make(chan int, 1)
+	luaFile           *os.File
+	luaFileIndexTodo  = WEAPON_INDEX_NONE // intermediate for debounce
+	luaFileIndex      = WEAPON_INDEX_NONE
+	lastSwitchToNone  time.Time
+	weaponIndexSignal = make(chan int, 1)
 )
 
 var _ = debugWaitForInput()
 
 func debugWaitForInput() (_ struct{}) {
-	if !debug {
+	if !DEBUG {
 		return
 	}
 	log.Debugf("pid: %d, ppid: %d", processId, parentProcessId)
@@ -138,7 +143,7 @@ func init() {
 
 	// load template
 	// [TODO] template files runtime watch using [fsnotify.NewWatcher]
-	panicIf(weapons.ReadFrom(templatesDir, 1, ".png", "__"))
+	panicIf(weapons.ReadFrom(TEMPLATES_DIRECTORY, 1, ".png", "__"))
 	log.Infof("num templates loaded: %d", len(weapons))
 
 	luaFile, err = os.OpenFile("speed.lua", os.O_WRONLY|os.O_CREATE, 0o664)
@@ -161,7 +166,7 @@ func main() {
 		cpuMeasureLoop(ctx)
 	})
 	wg.Go(func() {
-		outputLuaLoop(ctx)
+		luaSwitchingLoop(ctx)
 	})
 	wg.Go(func() {
 		windowLoop(ctx, cancel)
@@ -192,36 +197,60 @@ func cpuMeasureLoop(ctx context.Context) {
 	}
 }
 
-func outputLuaLoop(ctx context.Context) {
+func luaSwitchingLoop(ctx context.Context) {
+	// the actual duration is exactly a second,
+	// more for template matching loop delay
+	const debounceInterval = time.Millisecond * 1500
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 
-		case weaponIndex := <-outputSignal:
-			if weaponIndex == luaFileIndex {
+		case newIndex := <-weaponIndexSignal:
+			if newIndex == luaFileIndex {
 				continue
 			}
 
-			if luaFileIndex >= 0 && weaponIndex >= 0 {
+			if MATCHING_MISJUDGEMENT_ALERT &&
+				luaFileIndexTodo >= 0 && newIndex >= 0 {
 				os.Stderr.Write([]byte{'\a'})
 			}
+
+			if luaFileIndex >= 0 && newIndex == WEAPON_INDEX_NONE {
+				// from notnone to none
+				if luaFileIndexTodo != WEAPON_INDEX_NONE {
+					// going to none, enter debounce
+					luaFileIndexTodo = WEAPON_INDEX_NONE
+					lastSwitchToNone = time.Now()
+					continue
+				} else {
+					// debounce skipping
+					timeToNone := lastSwitchToNone.Add(debounceInterval)
+					if time.Now().Before(timeToNone) {
+						log.Debug("switching skipped due to debounce")
+						continue
+					}
+				}
+			} else {
+				luaFileIndexTodo = newIndex
+			}
+
 			if luaFileIndex >= 0 {
 				from := weapons[luaFileIndex]
-				var to *Weapon
-				var toName string
-				if weaponIndex >= 0 {
-					to = weapons[weaponIndex]
-					toName = to.Name
+				toName := "N/A"
+				if luaFileIndexTodo >= 0 {
+					toName = weapons[luaFileIndexTodo].Name
 				}
 				log.Debugf(
-					"switch from %d(%s) to %d(%s), last maxVal: %.2f",
+					"switch from %d(%s) to %d(%s), last maxVal: %.2f%%",
 					luaFileIndex, from.Name,
-					weaponIndex, toName,
+					luaFileIndexTodo, toName,
 					from.Template.MaxVal*100,
 				)
 			}
-			luaFileIndex = weaponIndex
+			luaFileIndex = luaFileIndexTodo
+
 			err := luaFile.Truncate(0)
 			if err != nil {
 				log.Warnf("luaFile failed to Truncate: %v", err)
@@ -234,10 +263,15 @@ func outputLuaLoop(ctx context.Context) {
 			}
 
 			var content string
-			if weaponIndex < 0 { // not found, all zero
+			switch {
+			case luaFileIndexTodo == WEAPON_INDEX_NONE:
 				content = "FAA=0\nFA1=0\nSAA=0\nSA1=0"
-			} else {
-				weapon := weapons[weaponIndex]
+
+			case luaFileIndexTodo < 0:
+				log.Panicf("unreachable: %d", luaFileIndexTodo)
+
+			default:
+				weapon := weapons[luaFileIndexTodo]
 				switch weapon.Mode {
 				case WEAPON_MODE_FULL_AUTO:
 					content = "FAA=" + weapon.SpeedAcog +
@@ -264,6 +298,7 @@ func outputLuaLoop(ctx context.Context) {
 				log.Warnf("luaFile failed to Sync: %v", err)
 				continue
 			}
+
 		}
 	}
 }
@@ -299,7 +334,9 @@ func windowLoop(ctx context.Context, cancel context.CancelFunc) {
 			if screenImage != nil {
 				layoutDisplay(gtx, screenImage)
 			}
-			layoutGocvInfo(gtx)
+			if drawEnabled {
+				layoutGocvInfo(gtx)
+			}
 
 			e.Frame(gtx.Ops)
 
@@ -327,6 +364,12 @@ func shortcutPrintProcess(key.Name, key.Modifiers) {
 func shortcutResetFreamsElapsed(key.Name, key.Modifiers) {
 	capturer.FramesElapsed = 0
 	log.Info("capturer.FramesElapsed reset")
+}
+
+var drawEnabled = true
+
+func shortcutToggleDraw(key.Name, key.Modifiers) {
+	drawEnabled = !drawEnabled
 }
 
 var showPosTill time.Time
@@ -412,7 +455,7 @@ func tmplMatchLoop(ctx context.Context) {
 	capture := gocv.NewMat()
 	defer capture.Close()
 
-	ticker := time.NewTicker(time.Millisecond * 128)
+	ticker := time.NewTicker(time.Millisecond * 200)
 	defer ticker.Stop()
 
 	for {
@@ -439,9 +482,9 @@ func tmplMatchLoop(ctx context.Context) {
 
 			// output
 			if weaponFound {
-				outputSignal <- weaponIndex
+				weaponIndexSignal <- weaponIndex
 			} else {
-				outputSignal <- -1
+				weaponIndexSignal <- WEAPON_INDEX_NONE
 			}
 
 			window.Invalidate()
@@ -512,7 +555,7 @@ func doMatchWeapon(captureRoi gocv.Mat) (templateIndex, templateMatched int, fou
 
 		templateMatched++
 
-		if tmpl.Template.MaxVal >= matchThreshold {
+		if tmpl.Template.MaxVal >= MATCH_THRESHOLD {
 			lastSuccessfulTempl = i
 			found = true
 			break // 跳过剩余匹配
