@@ -84,11 +84,11 @@ var (
 )
 
 var (
-	luaFile           *os.File
-	luaFileIndexTodo  = WEAPON_INDEX_NONE // intermediate for debounce
-	luaFileIndex      = WEAPON_INDEX_NONE
-	lastSwitchToNone  time.Time
-	weaponIndexSignal = make(chan int, 1)
+	luaFile             *os.File
+	luaFileIndex        = WEAPON_INDEX_NONE
+	luaToNoneDebounce   bool
+	luaLastSwitchToNone time.Time
+	weaponIndexSignal   = make(chan int, 1)
 )
 
 var _ = debugWaitForInput()
@@ -231,48 +231,54 @@ func luaSwitchingLoop(ctx context.Context) {
 			return
 		}
 
+		var from *Weapon
+		var to *Weapon
+		fromName := "N/A"
+		toName := "N/A"
+		var fromVal float32
+		var toVal float32
+		if luaFileIndex >= 0 {
+			from = weapons[luaFileIndex]
+			fromName = from.Name
+			fromVal = from.Template.MaxVal
+		}
+		if newIndex >= 0 {
+			to = weapons[newIndex]
+			toName = to.Name
+			toVal = to.Template.MaxVal
+		}
+
+		log.Debugf(
+			"switching from [%d]%s(%05.2f%%) to [%d]%s(%05.2f%%)",
+			luaFileIndex, fromName, fromVal*100,
+			newIndex, toName, toVal*100,
+		)
+
 		if MATCHING_MISJUDGEMENT_ALERT &&
-			luaFileIndexTodo >= 0 && newIndex >= 0 {
+			luaFileIndex >= 0 && newIndex >= 0 {
 			os.Stderr.Write([]byte{'\a'})
 		}
 
 		if luaFileIndex >= 0 && newIndex == WEAPON_INDEX_NONE {
 			// from notnone to none
-			if luaFileIndexTodo != WEAPON_INDEX_NONE {
+			if !luaToNoneDebounce {
 				// going to none, enter debounce
-				luaFileIndexTodo = WEAPON_INDEX_NONE
-				lastSwitchToNone = time.Now()
+				luaToNoneDebounce = true
+				luaLastSwitchToNone = time.Now()
 				return
 			} else {
 				// debounce skipping
-				timeToNone := lastSwitchToNone.Add(debounceInterval)
+				timeToNone := luaLastSwitchToNone.Add(debounceInterval)
 				if time.Now().Before(timeToNone) {
 					log.Debug("switching skipped due to debounce")
 					return
 				}
+				// exit debounce
+				luaToNoneDebounce = false
 			}
-		} else {
-			luaFileIndexTodo = newIndex
 		}
 
-		var from *Weapon
-		var to *Weapon
-		if luaFileIndex >= 0 {
-			from = weapons[luaFileIndex]
-			fromName := from.Name
-			toName := "N/A"
-			if luaFileIndexTodo >= 0 {
-				to = weapons[luaFileIndexTodo]
-				toName = to.Name
-			}
-			log.Debugf(
-				"switch from %d(%s) to %d(%s), last maxVal: %.2f%%",
-				luaFileIndex, fromName,
-				luaFileIndexTodo, toName,
-				from.Template.MaxVal*100,
-			)
-		}
-		luaFileIndex = luaFileIndexTodo
+		luaFileIndex = newIndex
 
 		err := luaFile.Truncate(0)
 		if err != nil {
