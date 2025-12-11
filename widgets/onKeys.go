@@ -9,52 +9,62 @@ import (
 	"gioui.org/op/clip"
 )
 
+type shortcutFunc func(key.Name, key.Modifiers)
+
 type Shortcut struct {
 	Keys []key.Name
-	F    func(key.Name, key.Modifiers)
+	F    []shortcutFunc
+}
+
+func NewShortcut(keys ...key.Name) *Shortcut {
+	return &Shortcut{
+		Keys: keys,
+	}
+}
+
+func (s *Shortcut) Do(f ...func(key.Name, key.Modifiers)) *Shortcut {
+	s.F = make([]shortcutFunc, 0, len(f))
+	for _, g := range f {
+		s.F = append(s.F, shortcutFunc(g))
+	}
+	return s
 }
 
 type Shortcuts struct {
 	receiver     any
 	eventFilters []event.Filter
-	shortcuts    map[key.Name]Shortcut
-}
-
-func NewShortcut(f func(key.Name, key.Modifiers), keys ...key.Name) Shortcut {
-	return Shortcut{
-		Keys: keys,
-		F:    f,
-	}
+	shortcutFuns map[key.Name][]shortcutFunc
 }
 
 // NewShortcuts does not allow multiple identical non-modifying keys
 // cause it uses map for matching internally.
-func NewShortcuts(receiver any, shortcuts ...Shortcut) (ss Shortcuts) {
+func NewShortcuts(receiver any, shortcuts ...*Shortcut) (ss Shortcuts) {
 	if len(shortcuts) == 0 {
 		panic("no shortcut provided")
 	}
 
 	ss.receiver = receiver
-	ss.eventFilters = []event.Filter{}
-	ss.shortcuts = make(map[key.Name]Shortcut, len(shortcuts))
+
+	keysSet := map[key.Name]struct{}{}
+	ss.shortcutFuns = make(map[key.Name][]shortcutFunc, len(shortcuts))
 	for _, s := range shortcuts {
 		for _, keyName := range s.Keys {
-			ss.eventFilters = append(ss.eventFilters,
-				key.Filter{
-					Optional: key.ModCtrl |
-						key.ModCommand |
-						key.ModShift |
-						key.ModAlt |
-						key.ModSuper,
-					Name: keyName,
-				},
-			)
-
-			if _, ok := ss.shortcuts[keyName]; ok {
-				panic(fmt.Errorf("repeated key: %s", keyName))
-			}
-			ss.shortcuts[keyName] = s
+			keysSet[keyName] = struct{}{}
+			shortcus := ss.shortcutFuns[keyName]
+			shortcus = append(shortcus, s.F...)
+			ss.shortcutFuns[keyName] = shortcus
 		}
+	}
+
+	const allOptional = key.ModCtrl | key.ModCommand |
+		key.ModShift | key.ModAlt | key.ModSuper
+	for keyName := range keysSet {
+		ss.eventFilters = append(ss.eventFilters,
+			key.Filter{
+				Optional: allOptional,
+				Name:     keyName,
+			},
+		)
 	}
 
 	return
@@ -75,11 +85,9 @@ func (ss *Shortcuts) Match(gtx layout.Context) error {
 			if e.State != key.Press {
 				continue
 			}
-			shortcut, ok := ss.shortcuts[e.Name]
-			if !ok {
-				continue
+			for _, f := range ss.shortcutFuns[e.Name] {
+				f(e.Name, e.Modifiers)
 			}
-			shortcut.F(e.Name, e.Modifiers)
 
 		default:
 			return fmt.Errorf("unknown key event[%T]: %v", event, event)

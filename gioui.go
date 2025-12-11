@@ -50,15 +50,28 @@ var (
 	mTheme = material.NewTheme()
 
 	shortcuts = widgets.NewShortcuts(&window,
-		widgets.NewShortcut(shortcutListWeapons, key.NameSpace),
-		widgets.NewShortcut(shortcutReloadWeapons, "W", "w"),
-		widgets.NewShortcut(shortcutPrintProcess, "P", "p"),
-		widgets.NewShortcut(shortcutResetFreamsElapsed, "F", "f"),
-		widgets.NewShortcut(shortcutToggleDraw, "D", "d"),
-		widgets.NewShortcut(shortcutMoveRoiRect, "R", "r",
+		widgets.NewShortcut(key.NameSpace).
+			Do(shortcutListWeapons),
+
+		widgets.NewShortcut("W", "w").
+			Do(shortcutReloadWeapons),
+
+		widgets.NewShortcut("P", "p").
+			Do(shortcutPrintProcess),
+
+		widgets.NewShortcut("F", "f").
+			Do(shortcutResetFreamsElapsed),
+
+		widgets.NewShortcut("D", "d").
+			Do(shortcutToggleDraw),
+
+		widgets.NewShortcut("R", "r",
 			key.NameUpArrow, key.NameDownArrow,
-			key.NameLeftArrow, key.NameRightArrow),
-		widgets.NewShortcut(shortcutSetWda, "T", "t"),
+			key.NameLeftArrow, key.NameRightArrow).
+			Do(shortcutMoveRoiRect),
+
+		widgets.NewShortcut("T", "t").
+			Do(shortcutSetWda),
 	)
 )
 
