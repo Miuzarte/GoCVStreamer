@@ -45,26 +45,30 @@ const (
 )
 
 type Weapon struct {
-	Path      string
-	Name      string
-	Mode      WeaponMode
-	SpeedAcog string
-	Speed1x   string
+	Path           string
+	Name           string
+	Mode           WeaponMode
+	SpeedMain      string
+	SpeedSecondary string
 
 	template.Template
+}
+
+func (w *Weapon) String() string {
+	return fmt.Sprintf("{%s_%s_%s}%s", w.Mode.string(true), w.SpeedMain, w.SpeedSecondary, w.Name)
 }
 
 type Weapons []*Weapon
 
 func parseFileName(path string) (name string, params [WEAPON_PARAMS_NUM]string, err error) {
-	base := filepath.Base(path) // "{FA_13_13}9x19VSN.png"
+	base := filepath.Base(path) // "{FA_13_13} 9x19VSN.png"
 	dotI := strings.LastIndexByte(base, '.')
 	if dotI < 0 {
 		err = fmt.Errorf("invalid file name: %s", base)
 		return
 	}
 
-	filename := base[:dotI] // "{FA_13_13}9x19VSN"
+	filename := base[:dotI] // "{FA_13_13} 9x19VSN"
 
 	bracesL, bracesR := strings.IndexByte(filename, '{'), strings.IndexByte(filename, '}')
 	if bracesL < 0 || bracesR < 0 {
@@ -72,7 +76,7 @@ func parseFileName(path string) (name string, params [WEAPON_PARAMS_NUM]string, 
 		return
 	}
 
-	name = filename[bracesR+1:]
+	name = strings.TrimSpace(filename[bracesR+1:]) // "9x19VSN"
 
 	p := strings.Split(filename[bracesL+1:bracesR], "_") // ["FA", "13", "13"]
 	if len(p) != WEAPON_PARAMS_NUM {
@@ -102,8 +106,8 @@ func (ws *Weapons) Append(path string) error {
 
 	w.Path = path
 	w.Name = name
-	w.SpeedAcog = params[1]
-	w.Speed1x = params[2]
+	w.SpeedMain = params[1]
+	w.SpeedSecondary = params[2]
 
 	err = w.Template.IMReadFrom(path, CREATE_MASK)
 	if err != nil {

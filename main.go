@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -239,12 +240,12 @@ func luaSwitchingLoop(ctx context.Context) {
 		var toVal float32
 		if luaFileIndex >= 0 {
 			from = weapons[luaFileIndex]
-			fromName = from.Name
+			fromName = from.String()
 			fromVal = from.Template.MaxVal
 		}
 		if newIndex >= 0 {
 			to = weapons[newIndex]
-			toName = to.Name
+			toName = to.String()
 			toVal = to.Template.MaxVal
 		}
 
@@ -291,7 +292,7 @@ func luaSwitchingLoop(ctx context.Context) {
 			return
 		}
 
-		const defaultContent = "FAA=0\nFA1=0\nSAA=0\nSA1=0"
+		const defaultContent = "FAM=0\nFAS=0\nSAM=-1\nSAS=-1"
 		var content string
 		switch {
 		case luaFileIndex == WEAPON_INDEX_NONE:
@@ -303,13 +304,13 @@ func luaSwitchingLoop(ctx context.Context) {
 		default:
 			switch to.Mode {
 			case WEAPON_MODE_FULL_AUTO:
-				content = "FAA=" + to.SpeedAcog +
-					"\n" + "FA1=" + to.Speed1x +
-					"\n" + "SAA=0" + "\n" + "SA1=0"
+				content = "FAM=" + to.SpeedMain +
+					"\n" + "FAS=" + to.SpeedSecondary +
+					"\n" + "SAM=0" + "\n" + "SAS=0"
 			case WEAPON_MODE_SEMI_AUTO:
-				content = "FAA=0" + "\n" + "FA1=0" +
-					"\n" + "SAA=" + to.SpeedAcog +
-					"\n" + "SA1=" + to.Speed1x
+				content = "FAM=0" + "\n" + "FAS=0" +
+					"\n" + "SAM=" + to.SpeedMain +
+					"\n" + "SAS=" + to.SpeedSecondary
 			default:
 				log.Warnf("unexpected tmpl.Mode: %s", to.Mode)
 				content = defaultContent
@@ -390,8 +391,11 @@ func shortcutListWeapons(key.Name, key.Modifiers) {
 	defer weaponsMu.RUnlock()
 
 	for i, tmpl := range weapons {
-		fmt.Printf("[%d] {%s_%s_%s}%s %.2f%%\n", i,
-			tmpl.Mode.string(true), tmpl.SpeedAcog, tmpl.Speed1x, tmpl.Name,
+		speedMain, _ := strconv.Atoi(tmpl.SpeedMain)
+		speedSecondary, _ := strconv.Atoi(tmpl.SpeedSecondary)
+		fmt.Printf("[%03d] {%s_%02d_%02d} %-17s %.2f%%\n", i,
+			tmpl.Mode.string(true), speedMain, speedSecondary,
+			tmpl.Name,
 			tmpl.Template.MaxVal*100)
 	}
 }
@@ -592,8 +596,8 @@ func tmplWatchLoop(ctx context.Context) {
 			}
 			w.Path = event.Name
 			w.Name = name
-			w.SpeedAcog = params[1]
-			w.Speed1x = params[2]
+			w.SpeedMain = params[1]
+			w.SpeedSecondary = params[2]
 		}
 
 		return nil

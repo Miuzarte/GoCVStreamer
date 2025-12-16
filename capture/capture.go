@@ -1,14 +1,12 @@
 package capture
 
 import (
-	"errors"
 	"fmt"
 	"image"
 	"sync"
 
 	"github.com/Miuzarte/SimpleLog"
 	"github.com/kbinani/screenshot"
-	"github.com/kirides/go-d3d"
 	"github.com/kirides/go-d3d/d3d11"
 	"github.com/kirides/go-d3d/outputduplication"
 	"github.com/kirides/go-d3d/win"
@@ -101,27 +99,30 @@ func (ss *Capturer) getImage(img *image.RGBA) error {
 	if err == nil {
 		ss.FramesElapsed++
 	} else {
-		if errors.Is(err, d3d.HRESULT(d3d.DXGI_ERROR_ACCESS_LOST)) {
-			/*
-				DXGI_ERROR_ACCESS_LOST if the desktop duplication interface is invalid.
-				The desktop duplication interface typically becomes invalid
-				when a different type of image is displayed on the desktop.
-				Examples of this situation are:
-					Desktop switch
-					Mode change
-					Switch from DWM on, DWM off, or other full-screen application
-				In this situation,
-				the application must release the IDXGIOutputDuplication interface
-				and create a new IDXGIOutputDuplication for the new content.
-			*/
-			log.Debugf("renewing shooter due to: %v", err)
-			err = ss.new()
-			if err != nil {
-				return err
-			} else {
-				return ss.getImage(img)
-			}
+		if err == outputduplication.ErrNoImageYet {
+			return err
 		}
+		// if errors.Is(err, d3d.HRESULT(d3d.DXGI_ERROR_ACCESS_LOST)) {
+		/*
+			DXGI_ERROR_ACCESS_LOST if the desktop duplication interface is invalid.
+			The desktop duplication interface typically becomes invalid
+			when a different type of image is displayed on the desktop.
+			Examples of this situation are:
+				Desktop switch
+				Mode change
+				Switch from DWM on, DWM off, or other full-screen application
+			In this situation,
+			the application must release the IDXGIOutputDuplication interface
+			and create a new IDXGIOutputDuplication for the new content.
+		*/
+		log.Debugf("renewing shooter due to: %v", err)
+		err = ss.new()
+		if err != nil {
+			return err
+		} else {
+			return ss.getImage(img)
+		}
+		// }
 	}
 	return err // [outputduplication.ErrNoImageYet]
 }
