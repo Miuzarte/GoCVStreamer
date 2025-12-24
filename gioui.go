@@ -65,6 +65,9 @@ var (
 		widgets.NewShortcut("D", "d").
 			Do(shortcutToggleDraw),
 
+		widgets.NewShortcut("B", "b").
+			Do(shortcutToggleDebug),
+
 		widgets.NewShortcut("R", "r",
 			key.NameUpArrow, key.NameDownArrow,
 			key.NameLeftArrow, key.NameRightArrow).
@@ -72,6 +75,13 @@ var (
 
 		widgets.NewShortcut("T", "t").
 			Do(shortcutSetWda),
+
+		widgets.NewShortcut("I", "i",
+			"0", "1", "2", "3", "4",
+			"5", "6", "7", "8", "9",
+			".", "-", key.NameReturn,
+			key.NameDeleteBackward).
+			Do(shortcutStartInput),
 	)
 )
 
@@ -118,15 +128,32 @@ func layoutGocvInfo(gtx layout.Context) {
 	defer weaponsMu.RUnlock()
 
 	const ms = float64(time.Millisecond)
+	var debugLabel string
+	if debug {
+		debugLabel = "DEBUG"
+	}
+	var inputtingLabel string
+	if inputting {
+		if !inputMainOrAlt {
+			inputtingLabel = "|M|: "
+		} else {
+			inputtingLabel = "|A|: "
+		}
+	}
 	status := fmt.Sprintf(
-		"| FPS: %05.2f | 截图: %.1fms | 0x%.4X |\n| CPU: %04.1f%% | 匹配: %.1fms/%d=%.2fms |",
+		"| FPS: %05.2f | 截图: %.1fms | 0x%.4X | %s\n| CPU: %04.1f%% | 匹配: %.1fms/%d=%.2fms |\n\n%s%s\n\n%s",
 		cvFps.Count(),
 		float64(captureCost)/ms,
 		capturer.FramesElapsed,
+		debugLabel,
 
 		cpu,
 		float64(templatesMatchingCost)/ms, weaponMatched,
 		float64(templatesMatchingCost)/float64(weaponMatched)/ms,
+
+		inputtingLabel, inputBuf.Bytes(),
+
+		luaFileContent,
 	)
 	widgets.Label(FONT_SIZE*1.5, status).Layout(gtx)
 
@@ -163,7 +190,7 @@ func layoutGocvInfo(gtx layout.Context) {
 		colorPos = colorYellow
 	}
 
-	if weaponPos.Template.MaxVal > 0 {
+	if weaponPos.Template.MaxVal >= 0.5 {
 		tmplPosPos := scalePos(
 			capturer.Bounds().Max, gtx.Constraints.Max,
 			image.Pt(

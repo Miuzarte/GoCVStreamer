@@ -3,8 +3,10 @@ package main
 import (
 	"fmt"
 	"io/fs"
+	"math"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/Miuzarte/GoCVStreamer/template"
@@ -12,10 +14,96 @@ import (
 
 const CREATE_MASK = false
 
+type WeaponType int
+
+const (
+	WEAPON_TYPE_MACHINE_PISTOL WeaponType = iota + 1
+	WEAPON_TYPE_SUBMACHINE_GUN
+	WEAPON_TYPE_ASSAULT_RIFLE
+	WEAPON_TYPE_LIGHT_MACHINE_GUN
+	WEAPON_TYPE_SEMI_AUTO
+)
+
+func (wt WeaponType) string(short bool) string {
+	switch wt {
+	case WEAPON_TYPE_MACHINE_PISTOL:
+		if short {
+			return "MP"
+		} else {
+			return "MachinePistol"
+		}
+	case WEAPON_TYPE_SUBMACHINE_GUN:
+		if short {
+			return "SG"
+		} else {
+			return "SubmachineGun"
+		}
+	case WEAPON_TYPE_ASSAULT_RIFLE:
+		if short {
+			return "AR"
+		} else {
+			return "AssaultRifle"
+		}
+	case WEAPON_TYPE_LIGHT_MACHINE_GUN:
+		if short {
+			return "MG"
+		} else {
+			return "LightMachineGun"
+		}
+	case WEAPON_TYPE_SEMI_AUTO:
+		if short {
+			return "SA"
+		} else {
+			return "SemiAuto"
+		}
+	default:
+		return fmt.Sprintf("unexpected value of weapon type: %d", wt)
+	}
+}
+
+func (wt WeaponType) String() string {
+	return wt.string(false)
+}
+
+var OffsetTable = [...]int{
+	0:                             0,
+	WEAPON_TYPE_MACHINE_PISTOL:    -2,
+	WEAPON_TYPE_SUBMACHINE_GUN:    -2,
+	WEAPON_TYPE_ASSAULT_RIFLE:     -2,
+	WEAPON_TYPE_LIGHT_MACHINE_GUN: -1,
+	WEAPON_TYPE_SEMI_AUTO:         -2,
+}
+
+func (wt WeaponType) SpeedOffset() int {
+	return OffsetTable[wt]
+}
+
+func ParseWeaponType(typ string) (WeaponType, error) {
+	switch typ {
+	case "MP":
+		return WEAPON_TYPE_MACHINE_PISTOL, nil
+	case "SG":
+		return WEAPON_TYPE_SUBMACHINE_GUN, nil
+	case "AR":
+		return WEAPON_TYPE_ASSAULT_RIFLE, nil
+	case "LMG", "MG":
+		return WEAPON_TYPE_LIGHT_MACHINE_GUN, nil
+	case "SA":
+		return WEAPON_TYPE_SEMI_AUTO, nil
+	default:
+		return 0, fmt.Errorf("invalid weapon type: %s", typ)
+	}
+}
+
 type WeaponMode int
 
-func (tm WeaponMode) string(short bool) string {
-	switch tm {
+const (
+	WEAPON_MODE_FULL_AUTO WeaponMode = iota + 1
+	WEAPON_MODE_SEMI_AUTO
+)
+
+func (wm WeaponMode) string(short bool) string {
+	switch wm {
 	case WEAPON_MODE_FULL_AUTO:
 		if short {
 			return "FA"
@@ -29,46 +117,148 @@ func (tm WeaponMode) string(short bool) string {
 			return "SemiAuto"
 		}
 	default:
-		return fmt.Sprintf("unexpected value of weapon mode: %d", tm)
+		return fmt.Sprintf("unexpected value of weapon mode: %d", wm)
 	}
 }
 
-func (tm WeaponMode) String() string {
-	return tm.string(false)
+func (wm WeaponMode) String() string {
+	return wm.string(false)
 }
 
-const WEAPON_PARAMS_NUM = 3
+func ParseWeaponMode(mode string) (WeaponMode, error) {
+	switch mode {
+	case "FA":
+		return WEAPON_MODE_FULL_AUTO, nil
+	case "SA":
+		return WEAPON_MODE_SEMI_AUTO, nil
+	default:
+		return 0, fmt.Errorf("invalid weapon mode: %s", mode)
+	}
+}
+
+const WEAPON_PARAMS_NUM = 4
 
 const (
-	WEAPON_MODE_FULL_AUTO WeaponMode = iota + 1
-	WEAPON_MODE_SEMI_AUTO
+	SPEED_ALTERNATIVE_RATIO = 0.7
+	SPEED_SIGN_AUTO         = "--"
+	SPEED_SIGN_COPY         = "=="
 )
 
 type Weapon struct {
-	Path           string
-	Name           string
-	Mode           WeaponMode
-	SpeedMain      string
-	SpeedSecondary string
+	Path                 string
+	Name                 string
+	Type                 WeaponType
+	Mode                 WeaponMode
+	SpeedMain            float64
+	SpeedMainInt         int
+	SpeedMainFrac        uint
+	SpeedAlternative     float64
+	SpeedAlternativeInt  int
+	SpeedAlternativeFrac uint
 
 	template.Template
 }
 
 func (w *Weapon) String() string {
-	return fmt.Sprintf("{%s_%s_%s}%s", w.Mode.string(true), w.SpeedMain, w.SpeedSecondary, w.Name)
+	return fmt.Sprintf(
+		"{%s_%s_%02d.%d_%02d.%d} %s",
+		w.Mode.string(true), w.Type.string(true),
+		w.SpeedMainInt, w.SpeedMainFrac,
+		w.SpeedAlternativeInt, w.SpeedAlternativeFrac,
+		w.Name,
+	)
+}
+
+func (w *Weapon) DecodeFrom(path string) error {
+	name, params, err := parseFileName(path)
+	if err != nil {
+		return err
+	}
+
+	if w.Name != "" {
+		// overwriting
+		if name != w.Name {
+			// wried
+			log.Warnf("weapon %q name was changed to %q", w.Name, name)
+		}
+	}
+
+	w.Path = path
+	w.Name = name
+	w.Mode, err = ParseWeaponMode(params[0])
+	if err != nil {
+		return err
+	}
+	w.Type, err = ParseWeaponType(params[1])
+	if err != nil {
+		return err
+	}
+
+	w.SpeedMain, err = strconv.ParseFloat(params[2], 64)
+	if err != nil {
+		return err
+	}
+	integer, fraction := math.Modf(w.SpeedMain)
+	w.SpeedMainInt, w.SpeedMainFrac = int(integer), uint(math.Round(fraction*10))
+
+	switch params[3] {
+	case SPEED_SIGN_AUTO:
+		w.SpeedAlternative = w.SpeedMain * SPEED_ALTERNATIVE_RATIO
+	case SPEED_SIGN_COPY:
+		w.SpeedAlternative = w.SpeedMain
+	default:
+		w.SpeedAlternative, err = strconv.ParseFloat(params[3], 64)
+		if err != nil {
+			return err
+		}
+	}
+	integer, fraction = math.Modf(w.SpeedAlternative)
+	w.SpeedAlternativeInt, w.SpeedAlternativeFrac = int(integer), uint(math.Round(fraction*10))
+
+	err = w.Template.IMReadFrom(path, CREATE_MASK)
+	if err != nil {
+		return fmt.Errorf("weapon %s failed to IMRead: %w", w.Name, err)
+	}
+	return nil
+}
+
+func (w *Weapon) SpeedMainWOffset() (int, uint) {
+	if w.SpeedMain == 0 {
+		return 0, 0
+	}
+	return w.SpeedMainInt + w.Type.SpeedOffset(), w.SpeedMainFrac
+}
+
+func (w *Weapon) SpeedAlternativeWOffset() (int, uint) {
+	if w.SpeedAlternative == 0 {
+		return 0, 0
+	}
+	return w.SpeedAlternativeInt + w.Type.SpeedOffset(), w.SpeedAlternativeFrac
+}
+
+func (w *Weapon) GetAllSpeeds(orig bool) (speedMain int, speedMainF uint, speedAlt int, speedAltF uint) {
+	if !orig {
+		speedMain, speedMainF = w.SpeedMainWOffset()
+		speedAlt, speedAltF = w.SpeedAlternativeWOffset()
+	} else {
+		// debugging, use orig
+		speedMain, speedMainF = w.SpeedMainInt, w.SpeedMainFrac
+		speedAlt, speedAltF = w.SpeedAlternativeInt, w.SpeedAlternativeFrac
+	}
+	return
 }
 
 type Weapons []*Weapon
 
 func parseFileName(path string) (name string, params [WEAPON_PARAMS_NUM]string, err error) {
-	base := filepath.Base(path) // "{FA_13_13} 9x19VSN.png"
+	base := filepath.Base(path) // "{FA_SG_13.0_13.0} 9x19VSN.png"
 	dotI := strings.LastIndexByte(base, '.')
 	if dotI < 0 {
 		err = fmt.Errorf("invalid file name: %s", base)
 		return
 	}
 
-	filename := base[:dotI] // "{FA_13_13} 9x19VSN"
+	filename := base[:dotI] // "{FA_SG_13.0_13.0} 9x19VSN"
 
 	bracesL, bracesR := strings.IndexByte(filename, '{'), strings.IndexByte(filename, '}')
 	if bracesL < 0 || bracesR < 0 {
@@ -76,46 +266,26 @@ func parseFileName(path string) (name string, params [WEAPON_PARAMS_NUM]string, 
 		return
 	}
 
-	name = strings.TrimSpace(filename[bracesR+1:]) // "9x19VSN"
-
-	p := strings.Split(filename[bracesL+1:bracesR], "_") // ["FA", "13", "13"]
-	if len(p) != WEAPON_PARAMS_NUM {
-		err = fmt.Errorf("invalid file params: %s", params)
+	p := filename[bracesL+1 : bracesR] // FA_SG_13.0_13.0
+	ps := strings.Split(p, "_")        // ["FA", "SG", "13.0", "13.0"]
+	if len(ps) != WEAPON_PARAMS_NUM {
+		err = fmt.Errorf("invalid weapon params: %s", params)
 		return
 	}
-	copy(params[:], p)
+	copy(params[:], ps)
+	name = strings.TrimSpace(filename[bracesR+1:]) // "9x19VSN"
 	return
 }
 
-func (ws *Weapons) Append(path string) error {
-	name, params, err := parseFileName(path)
+func (ws *Weapons) Append(path string) (err error) {
+	w := &Weapon{}
+
+	err = w.DecodeFrom(path)
 	if err != nil {
 		return err
 	}
 
-	w := &Weapon{}
-
-	switch params[0] {
-	case "FA":
-		w.Mode = WEAPON_MODE_FULL_AUTO
-	case "SA":
-		w.Mode = WEAPON_MODE_SEMI_AUTO
-	default:
-		return fmt.Errorf("invalid file params mode: %s", params[0])
-	}
-
-	w.Path = path
-	w.Name = name
-	w.SpeedMain = params[1]
-	w.SpeedSecondary = params[2]
-
-	err = w.Template.IMReadFrom(path, CREATE_MASK)
-	if err != nil {
-		return fmt.Errorf("weapon %s failed to IMRead: %w", w.Name, err)
-	}
-
 	*ws = append(*ws, w)
-
 	return nil
 }
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"image"
@@ -13,7 +14,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -40,6 +40,8 @@ const (
 	DRAW_NEGATIVE_RESULT        = false
 	MATCHING_MISJUDGEMENT_ALERT = false
 )
+
+var debug = DEBUG
 
 const (
 	TEMPLATES_DIRECTORY     = "templates"
@@ -87,6 +89,7 @@ var (
 var (
 	luaFile             *os.File
 	luaFileIndex        = WEAPON_INDEX_NONE
+	luaFileContent      string
 	luaToNoneDebounce   bool
 	luaLastSwitchToNone time.Time
 	weaponIndexSignal   = make(chan int, 1)
@@ -95,7 +98,7 @@ var (
 var _ = debugWaitForInput()
 
 func debugWaitForInput() (_ struct{}) {
-	if !DEBUG {
+	if !debug {
 		return
 	}
 	log.Debugf("pid: %d, ppid: %d", processId, parentProcessId)
@@ -219,6 +222,8 @@ func cpuMeasureLoop(ctx context.Context) {
 	}
 }
 
+var forceUpdate = false
+
 func luaSwitchingLoop(ctx context.Context) {
 	// the actual duration is exactly a second,
 	// more for template matching loop delay
@@ -228,25 +233,33 @@ func luaSwitchingLoop(ctx context.Context) {
 		weaponsMu.RLock()
 		defer weaponsMu.RUnlock()
 
-		if newIndex == luaFileIndex {
-			return
-		}
-
 		var from *Weapon
-		var to *Weapon
 		fromName := "N/A"
-		toName := "N/A"
 		var fromVal float32
-		var toVal float32
 		if luaFileIndex >= 0 {
 			from = weapons[luaFileIndex]
 			fromName = from.String()
 			fromVal = from.Template.MaxVal
 		}
+
+		var to *Weapon
+		toName := "N/A"
+		var toVal float32
 		if newIndex >= 0 {
 			to = weapons[newIndex]
 			toName = to.String()
 			toVal = to.Template.MaxVal
+		}
+
+		if forceUpdate {
+			forceUpdate = false
+		} else if newIndex == luaFileIndex {
+			return
+		}
+
+		if MATCHING_MISJUDGEMENT_ALERT &&
+			luaFileIndex >= 0 && newIndex >= 0 {
+			os.Stderr.Write([]byte{'\a'})
 		}
 
 		log.Debugf(
@@ -255,12 +268,8 @@ func luaSwitchingLoop(ctx context.Context) {
 			newIndex, toName, toVal*100,
 		)
 
-		if MATCHING_MISJUDGEMENT_ALERT &&
-			luaFileIndex >= 0 && newIndex >= 0 {
-			os.Stderr.Write([]byte{'\a'})
-		}
-
-		if luaFileIndex >= 0 && newIndex == WEAPON_INDEX_NONE {
+		// no debounce when debugging
+		if !debug && luaFileIndex >= 0 && newIndex == WEAPON_INDEX_NONE {
 			// from notnone to none
 			if !luaToNoneDebounce {
 				// going to none, enter debounce
@@ -292,32 +301,49 @@ func luaSwitchingLoop(ctx context.Context) {
 			return
 		}
 
-		const defaultContent = "FAM=0\nFAS=0\nSAM=-1\nSAS=-1"
-		var content string
+		const defaultContent = "FAM=0" +
+			"\n" + "FAMF=0" +
+			"\n" + "FAA=0" +
+			"\n" + "FAAF=0" +
+			"\n" + "SAM=-1" +
+			"\n" + "SAMF=0" +
+			"\n" + "SAA=-1" +
+			"\n" + "SAAF=0"
+
 		switch {
 		case luaFileIndex == WEAPON_INDEX_NONE:
-			content = defaultContent
-
+			luaFileContent = defaultContent
 		case luaFileIndex < 0:
 			log.Panicf("unreachable: %d", luaFileIndex)
 
 		default:
+			speedMain, speedMainF, speedAlt, speedAltF := FastItoa4(to.GetAllSpeeds(debug))
 			switch to.Mode {
 			case WEAPON_MODE_FULL_AUTO:
-				content = "FAM=" + to.SpeedMain +
-					"\n" + "FAS=" + to.SpeedSecondary +
-					"\n" + "SAM=0" + "\n" + "SAS=0"
+				luaFileContent = "FAM=" + speedMain +
+					"\n" + "FAMF=" + speedMainF +
+					"\n" + "FAA=" + speedAlt +
+					"\n" + "FAAF=" + speedAltF +
+					"\n" + "SAM=" + "0" +
+					"\n" + "SAMF=" + "0" +
+					"\n" + "SAA=" + "0" +
+					"\n" + "SAAF=" + "0"
 			case WEAPON_MODE_SEMI_AUTO:
-				content = "FAM=0" + "\n" + "FAS=0" +
-					"\n" + "SAM=" + to.SpeedMain +
-					"\n" + "SAS=" + to.SpeedSecondary
+				luaFileContent = "FAM=" + "0" +
+					"\n" + "FAMF=" + "0" +
+					"\n" + "FAA=" + "0" +
+					"\n" + "FAAF=" + "0" +
+					"\n" + "SAM=" + speedMain +
+					"\n" + "SAMF=" + speedMainF +
+					"\n" + "SAA=" + speedAlt +
+					"\n" + "SAAF=" + speedAltF
 			default:
 				log.Warnf("unexpected tmpl.Mode: %s", to.Mode)
-				content = defaultContent
+				luaFileContent = defaultContent
 			}
 		}
 
-		_, err = luaFile.WriteString(content)
+		_, err = luaFile.WriteString(luaFileContent)
 		if err != nil {
 			log.Warnf("luaFile failed to WriteString: %v", err)
 			return
@@ -386,17 +412,42 @@ func windowLoop(ctx context.Context, cancel context.CancelFunc) {
 	}
 }
 
+var (
+	onceWeaponNameLongest sync.Once
+	weaponNameLongest     int
+)
+
 func shortcutListWeapons(key.Name, key.Modifiers) {
+	const indexLength = 3
+
 	weaponsMu.RLock()
 	defer weaponsMu.RUnlock()
 
-	for i, tmpl := range weapons {
-		speedMain, _ := strconv.Atoi(tmpl.SpeedMain)
-		speedSecondary, _ := strconv.Atoi(tmpl.SpeedSecondary)
-		fmt.Printf("[%03d] {%s_%02d_%02d} %-17s %.2f%%\n", i,
-			tmpl.Mode.string(true), speedMain, speedSecondary,
-			tmpl.Name,
-			tmpl.Template.MaxVal*100)
+	onceWeaponNameLongest.Do(func() {
+		for _, w := range weapons {
+			weaponNameLongest = max(weaponNameLongest, len(w.Name))
+		}
+	})
+
+	skipped := 0
+	for i, w := range weapons {
+		if w.SpeedMain == 0 {
+			skipped++
+			continue
+		}
+
+		speedMain, speedMainF, speedAlt, speedAltF := w.GetAllSpeeds(debug)
+		fmt.Printf(
+			"[%0*d] {%s_%s_%02d.%d_%02d.%d} %-*s %.2f%%\n",
+			indexLength, i,
+			w.Mode.string(true), w.Type.string(true),
+			speedMain, speedMainF, speedAlt, speedAltF,
+			weaponNameLongest, w.Name,
+			w.Template.MaxVal*100,
+		)
+	}
+	if skipped > 0 {
+		log.Infof("skipped %d undefined weapon(s)", skipped)
 	}
 }
 
@@ -423,6 +474,12 @@ var drawEnabled = true
 
 func shortcutToggleDraw(key.Name, key.Modifiers) {
 	drawEnabled = !drawEnabled
+}
+
+func shortcutToggleDebug(key.Name, key.Modifiers) {
+	debug = !debug
+	log.Infof("debugging: %v", debug)
+	forceUpdate = true
 }
 
 var showPosTill time.Time
@@ -501,6 +558,99 @@ func shortcutSetWda(_ key.Name, mod key.Modifiers) {
 	}
 }
 
+func modWeapon(mainOrAlt bool, newSpeed string) {
+	if luaFileIndex == WEAPON_INDEX_NONE {
+		log.Warn("weapon unselected")
+		return
+	}
+
+	switch newSpeed {
+	case "-":
+		mainOrAlt = true // only for alt speed
+		newSpeed = SPEED_SIGN_AUTO
+	case "--":
+		mainOrAlt = true
+		newSpeed = SPEED_SIGN_COPY
+	}
+
+	orig := weapons[luaFileIndex]
+	dir := filepath.Dir(orig.Path)
+	origName := filepath.Base(orig.Path)
+	ext := filepath.Ext(origName)
+
+	var speedMain, speedAlt string
+	if !mainOrAlt {
+		speedMain = newSpeed
+		if orig.SpeedAlternativeFrac != 0 {
+			speedAlt = fmt.Sprintf("%d.%d", orig.SpeedAlternativeInt, orig.SpeedAlternativeFrac)
+		} else {
+			speedAlt = fmt.Sprintf("%d", orig.SpeedAlternativeInt)
+		}
+	} else {
+		if orig.SpeedMainFrac != 0 {
+			speedMain = fmt.Sprintf("%d.%d", orig.SpeedMainInt, orig.SpeedMainFrac)
+		} else {
+			speedMain = fmt.Sprintf("%d", orig.SpeedMainInt)
+		}
+		speedAlt = newSpeed
+	}
+
+	newName := fmt.Sprintf("{%s_%s_%s_%s} %s%s",
+		orig.Mode.string(true), orig.Type.string(true),
+		speedMain, speedAlt,
+		orig.Name, ext,
+	)
+	newPath := filepath.Join(dir, newName)
+	err := os.Rename(orig.Path, newPath)
+	if err != nil {
+		log.Errorf("[main] failed to rename file from %q to %q", orig.Path, newPath)
+	} else {
+		log.Infof("[main] renamed file from %q to %q", orig.Path, newPath)
+	}
+
+	forceUpdate = true
+}
+
+var (
+	inputting      bool
+	inputMainOrAlt bool // true for alt
+	inputBuf       bytes.Buffer
+)
+
+func shortcutStartInput(k key.Name, m key.Modifiers) {
+	switch k {
+	case "I", "i": // start
+		if !debug {
+			log.Warnf("not in debugging")
+			return
+		}
+		inputting = true
+		inputMainOrAlt = m.Contain(key.ModShift)
+		return
+
+	case key.NameDeleteBackward:
+		if inputBuf.Len() == 0 {
+			return
+		}
+		inputBuf.Truncate(inputBuf.Len() - 1)
+
+	case key.NameReturn: // confirm
+		inputting = false
+		if inputBuf.Len() == 0 {
+			log.Warn("empty input")
+			return
+		}
+		modWeapon(inputMainOrAlt, inputBuf.String())
+		inputBuf.Reset()
+
+	case "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ".", "-":
+		if inputting {
+			inputBuf.WriteString(string(k))
+		}
+		return
+	}
+}
+
 func tmplWatchLoop(ctx context.Context) {
 	type myFsEvent struct {
 		Name        string
@@ -565,39 +715,20 @@ func tmplWatchLoop(ctx context.Context) {
 			if err != nil {
 				return fmt.Errorf("failed to add new weapon %q: %w", event.Name, err)
 			}
+
 		} else {
 			// modify
-			name, params, err := parseFileName(event.Name)
-			if err != nil {
-				return fmt.Errorf("failed to parse file %q to modify: %w", name, err)
-			}
+
 			if strings.HasPrefix(filepath.Base(event.Name), TEMPLATES_PREFIX_IGNORE) {
 				// delete
-				_, err := weapons.DeleteByName(name)
+				err := weapons.Delete(origI)
 				if err != nil {
-					return fmt.Errorf("failed to delete %q: %w", name, err)
+					return fmt.Errorf("failed to delete %q: %w", origName, err)
 				}
 				return nil
 			}
 
-			if name != origName {
-				// wried
-				log.Warnf("weapon %q name was changed to %q", origName, name)
-			}
-
-			w := weapons[origI]
-			switch params[0] {
-			case "FA":
-				w.Mode = WEAPON_MODE_FULL_AUTO
-			case "SA":
-				w.Mode = WEAPON_MODE_SEMI_AUTO
-			default:
-				return fmt.Errorf("invalid file params mode: %s", params[0])
-			}
-			w.Path = event.Name
-			w.Name = name
-			w.SpeedMain = params[1]
-			w.SpeedSecondary = params[2]
+			return weapons[origI].DecodeFrom(event.Name)
 		}
 
 		return nil
