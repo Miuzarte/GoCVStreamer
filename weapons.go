@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"io/fs"
 	"math"
@@ -157,6 +158,7 @@ type Weapon struct {
 	SpeedAlternativeFrac uint
 
 	template.Template
+	luaBuf bytes.Buffer
 }
 
 func (w *Weapon) String() string {
@@ -246,6 +248,65 @@ func (w *Weapon) GetAllSpeeds(orig bool) (speedMain int, speedMainF uint, speedA
 		speedAlt, speedAltF = w.SpeedAlternativeInt, w.SpeedAlternativeFrac
 	}
 	return
+}
+
+const DEFAULT_CONTENT_FULL_AUTO = "FAM=0" + "\n" +
+	"FAMF=0" + "\n" +
+	"FAA=0" + "\n" +
+	"FAAF=0" + "\n"
+
+const DEFAULT_CONTENT_SEMI_AUTO = "SAM=-1" + "\n" +
+	"SAMF=0" + "\n" +
+	"SAA=-1" + "\n" +
+	"SAAF=0" + "\n"
+
+const DEFAULT_CONTENT = DEFAULT_CONTENT_FULL_AUTO + DEFAULT_CONTENT_SEMI_AUTO
+
+func (w *Weapon) Lua(debug bool) []byte {
+	if w == nil {
+		return []byte(DEFAULT_CONTENT)
+	}
+
+	w.luaBuf.Reset()
+
+	speedMain, speedMainF, speedAlt, speedAltF := FastItoa4(w.GetAllSpeeds(debug))
+
+	switch w.Mode {
+	case WEAPON_MODE_FULL_AUTO:
+		w.luaBuf.WriteString("FAM=")
+		w.luaBuf.WriteString(speedMain)
+		w.luaBuf.WriteByte('\n')
+		w.luaBuf.WriteString("FAMF=")
+		w.luaBuf.WriteString(speedMainF)
+		w.luaBuf.WriteByte('\n')
+		w.luaBuf.WriteString("FAA=")
+		w.luaBuf.WriteString(speedAlt)
+		w.luaBuf.WriteByte('\n')
+		w.luaBuf.WriteString("FAAF=")
+		w.luaBuf.WriteString(speedAltF)
+		w.luaBuf.WriteByte('\n')
+		w.luaBuf.WriteString(DEFAULT_CONTENT_SEMI_AUTO)
+
+	case WEAPON_MODE_SEMI_AUTO:
+		w.luaBuf.WriteString("SAM=")
+		w.luaBuf.WriteString(speedMain)
+		w.luaBuf.WriteByte('\n')
+		w.luaBuf.WriteString("SAMF=")
+		w.luaBuf.WriteString(speedMainF)
+		w.luaBuf.WriteByte('\n')
+		w.luaBuf.WriteString("SAA=")
+		w.luaBuf.WriteString(speedAlt)
+		w.luaBuf.WriteByte('\n')
+		w.luaBuf.WriteString("SAAF=")
+		w.luaBuf.WriteString(speedAltF)
+		w.luaBuf.WriteByte('\n')
+		w.luaBuf.WriteString(DEFAULT_CONTENT_FULL_AUTO)
+
+	default:
+		log.Panicf("unexpected Weapon.Mode: %d", w.Mode)
+	}
+
+	return w.luaBuf.Bytes()
 }
 
 type Weapons []*Weapon

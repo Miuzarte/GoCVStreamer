@@ -69,11 +69,11 @@ var (
 )
 
 var (
-	weaponsMu     sync.RWMutex
-	weapons       Weapons
-	weaponIndex   int
-	weaponMatched = 1
-	weaponFound   bool
+	weaponsMu      sync.RWMutex
+	weapons        Weapons
+	weaponsMatched = 1
+	weaponIndex    int
+	weaponFound    bool
 )
 
 const WEAPON_INDEX_NONE = -1
@@ -82,14 +82,14 @@ const WEAPON_INDEX_NONE = -1
 const MATCH_THRESHOLD = 0.9
 
 var (
-	captureCost           time.Duration
-	templatesMatchingCost time.Duration
+	captureCost         time.Duration
+	weaponsMatchingCost time.Duration
 )
 
 var (
 	luaFile             *os.File
-	luaFileIndex        = WEAPON_INDEX_NONE
-	luaFileContent      string
+	luaFileContentIndex = WEAPON_INDEX_NONE
+	luaFileContent      []byte
 	luaToNoneDebounce   bool
 	luaLastSwitchToNone time.Time
 	weaponIndexSignal   = make(chan int, 1)
@@ -236,8 +236,8 @@ func luaSwitchingLoop(ctx context.Context) {
 		var from *Weapon
 		fromName := "N/A"
 		var fromVal float32
-		if luaFileIndex >= 0 {
-			from = weapons[luaFileIndex]
+		if luaFileContentIndex >= 0 {
+			from = weapons[luaFileContentIndex]
 			fromName = from.String()
 			fromVal = from.Template.MaxVal
 		}
@@ -253,23 +253,23 @@ func luaSwitchingLoop(ctx context.Context) {
 
 		if forceUpdate {
 			forceUpdate = false
-		} else if newIndex == luaFileIndex {
+		} else if newIndex == luaFileContentIndex {
 			return
 		}
 
 		if MATCHING_MISJUDGEMENT_ALERT &&
-			luaFileIndex >= 0 && newIndex >= 0 {
+			luaFileContentIndex >= 0 && newIndex >= 0 {
 			os.Stderr.Write([]byte{'\a'})
 		}
 
 		log.Debugf(
 			"switching from [%d]%s(%05.2f%%) to [%d]%s(%05.2f%%)",
-			luaFileIndex, fromName, fromVal*100,
+			luaFileContentIndex, fromName, fromVal*100,
 			newIndex, toName, toVal*100,
 		)
 
 		// no debounce when debugging
-		if !debug && luaFileIndex >= 0 && newIndex == WEAPON_INDEX_NONE {
+		if !debug && luaFileContentIndex >= 0 && newIndex == WEAPON_INDEX_NONE {
 			// from notnone to none
 			if !luaToNoneDebounce {
 				// going to none, enter debounce
@@ -288,7 +288,8 @@ func luaSwitchingLoop(ctx context.Context) {
 			}
 		}
 
-		luaFileIndex = newIndex
+		luaFileContentIndex = newIndex
+		luaFileContent = to.Lua(debug)
 
 		err := luaFile.Truncate(0)
 		if err != nil {
@@ -301,51 +302,9 @@ func luaSwitchingLoop(ctx context.Context) {
 			return
 		}
 
-		const defaultContent = "FAM=0" +
-			"\n" + "FAMF=0" +
-			"\n" + "FAA=0" +
-			"\n" + "FAAF=0" +
-			"\n" + "SAM=-1" +
-			"\n" + "SAMF=0" +
-			"\n" + "SAA=-1" +
-			"\n" + "SAAF=0"
-
-		switch {
-		case luaFileIndex == WEAPON_INDEX_NONE:
-			luaFileContent = defaultContent
-		case luaFileIndex < 0:
-			log.Panicf("unreachable: %d", luaFileIndex)
-
-		default:
-			speedMain, speedMainF, speedAlt, speedAltF := FastItoa4(to.GetAllSpeeds(debug))
-			switch to.Mode {
-			case WEAPON_MODE_FULL_AUTO:
-				luaFileContent = "FAM=" + speedMain +
-					"\n" + "FAMF=" + speedMainF +
-					"\n" + "FAA=" + speedAlt +
-					"\n" + "FAAF=" + speedAltF +
-					"\n" + "SAM=" + "0" +
-					"\n" + "SAMF=" + "0" +
-					"\n" + "SAA=" + "0" +
-					"\n" + "SAAF=" + "0"
-			case WEAPON_MODE_SEMI_AUTO:
-				luaFileContent = "FAM=" + "0" +
-					"\n" + "FAMF=" + "0" +
-					"\n" + "FAA=" + "0" +
-					"\n" + "FAAF=" + "0" +
-					"\n" + "SAM=" + speedMain +
-					"\n" + "SAMF=" + speedMainF +
-					"\n" + "SAA=" + speedAlt +
-					"\n" + "SAAF=" + speedAltF
-			default:
-				log.Warnf("unexpected tmpl.Mode: %s", to.Mode)
-				luaFileContent = defaultContent
-			}
-		}
-
-		_, err = luaFile.WriteString(luaFileContent)
+		_, err = luaFile.Write(luaFileContent)
 		if err != nil {
-			log.Warnf("luaFile failed to WriteString: %v", err)
+			log.Warnf("luaFile failed to Write: %v", err)
 			return
 		}
 		err = luaFile.Sync()
@@ -559,7 +518,7 @@ func shortcutSetWda(_ key.Name, mod key.Modifiers) {
 }
 
 func modWeapon(mainOrAlt bool, newSpeed string) {
-	if luaFileIndex == WEAPON_INDEX_NONE {
+	if luaFileContentIndex == WEAPON_INDEX_NONE {
 		log.Warn("weapon unselected")
 		return
 	}
@@ -573,7 +532,7 @@ func modWeapon(mainOrAlt bool, newSpeed string) {
 		newSpeed = SPEED_SIGN_COPY
 	}
 
-	orig := weapons[luaFileIndex]
+	orig := weapons[luaFileContentIndex]
 	dir := filepath.Dir(orig.Path)
 	origName := filepath.Base(orig.Path)
 	ext := filepath.Ext(origName)
@@ -635,6 +594,9 @@ func shortcutStartInput(k key.Name, m key.Modifiers) {
 		inputBuf.Truncate(inputBuf.Len() - 1)
 
 	case key.NameReturn: // confirm
+		if !inputting {
+			return
+		}
 		inputting = false
 		if inputBuf.Len() == 0 {
 			log.Warn("empty input")
@@ -659,7 +621,7 @@ func tmplWatchLoop(ctx context.Context) {
 	}
 	if unsafe.Sizeof(myFsEvent{}) != unsafe.Sizeof(fsnotify.Event{}) ||
 		reflect.TypeOf(myFsEvent{}).NumField() != reflect.TypeOf(fsnotify.Event{}).NumField() {
-		log.Panic("[FIXME] define of fsnotify.Event has been changed")
+		log.Panic("[FIXME] definition of fsnotify.Event has been changed")
 	}
 
 	watcher, err := fsnotify.NewWatcher()
@@ -679,30 +641,28 @@ func tmplWatchLoop(ctx context.Context) {
 		return n, nil
 	}
 
-	muAddWeapon := func(event fsnotify.Event) error {
+	muAddWeapon := func(name string) error {
 		weaponsMu.Lock()
 		defer weaponsMu.Unlock()
 
 		time.Sleep(time.Millisecond * 100) // simply wait for the end of writing
-		err := weapons.Append(event.Name)
+		err := weapons.Append(name)
 		if err != nil {
-			return fmt.Errorf("failed to add new weapon %q: %w", event.Name, err)
+			return fmt.Errorf("failed to add new weapon %q: %w", name, err)
 		}
 		return nil
 	}
 
-	muModWeapon := func(event fsnotify.Event) error {
+	muModWeapon := func(from, to string) error {
 		weaponsMu.Lock()
 		defer weaponsMu.Unlock()
 
-		renameFrom := (*myFsEvent)(unsafe.Pointer(&event)).renamedFrom
-
-		if strings.HasPrefix(event.Name, TEMPLATES_PREFIX_IGNORE) {
+		if strings.HasPrefix(to, TEMPLATES_PREFIX_IGNORE) {
 			return nil
 		}
 
 		origI := -1
-		origName, _, err := parseFileName(renameFrom)
+		origName, _, err := parseFileName(from)
 		if err == nil {
 			origI = weapons.IndexByName(origName)
 			// } else {
@@ -711,15 +671,15 @@ func tmplWatchLoop(ctx context.Context) {
 
 		if origI < 0 {
 			// load the new one
-			err := weapons.Append(event.Name)
+			err := weapons.Append(to)
 			if err != nil {
-				return fmt.Errorf("failed to add new weapon %q: %w", event.Name, err)
+				return fmt.Errorf("failed to add new weapon %q: %w", to, err)
 			}
 
 		} else {
 			// modify
 
-			if strings.HasPrefix(filepath.Base(event.Name), TEMPLATES_PREFIX_IGNORE) {
+			if strings.HasPrefix(filepath.Base(to), TEMPLATES_PREFIX_IGNORE) {
 				// delete
 				err := weapons.Delete(origI)
 				if err != nil {
@@ -728,7 +688,7 @@ func tmplWatchLoop(ctx context.Context) {
 				return nil
 			}
 
-			return weapons[origI].DecodeFrom(event.Name)
+			return weapons[origI].DecodeFrom(to)
 		}
 
 		return nil
@@ -766,10 +726,10 @@ func tmplWatchLoop(ctx context.Context) {
 
 				if renameFrom == "" {
 					// is fsCreate
-					err = muAddWeapon(event)
+					err = muAddWeapon(event.Name)
 				} else {
 					// is fsRename
-					err = muModWeapon(event)
+					err = muModWeapon(renameFrom, event.Name)
 				}
 				if err != nil {
 					log.Warn(err)
@@ -842,8 +802,8 @@ func tmplMatchLoop(ctx context.Context) {
 			// template match
 			captureRoi := capture.Region(roiRect)
 			tStart = time.Now()
-			weaponIndex, weaponMatched, weaponFound = doMatchWeapon(captureRoi)
-			templatesMatchingCost = time.Since(tStart)
+			weaponIndex, weaponsMatched, weaponFound = doMatchWeapon(captureRoi)
+			weaponsMatchingCost = time.Since(tStart)
 			captureRoi.Close()
 
 			// output

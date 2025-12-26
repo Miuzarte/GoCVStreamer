@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"image"
 	"image/color"
+	textTemplate "text/template"
 	"time"
 
 	"gioui.org/app"
@@ -111,7 +113,7 @@ func layoutDisplay(gtx layout.Context, img image.Image) {
 	// 居中
 	defer op.Offset(image.Pt((gtxW-drawW)/2, (gtxH-drawH)/2)).Push(gtx.Ops).Pop()
 	// 缩放
-	defer op.Affine(f32.Affine2D{}.Scale(f32.Pt(0, 0), f32.Pt(scale, scale))).Push(gtx.Ops).Pop()
+	defer op.Affine(f32.AffineId().Scale(f32.Pt(0, 0), f32.Pt(scale, scale))).Push(gtx.Ops).Pop()
 
 	// 绘制
 	paint.NewImageOp(img).Add(gtx.Ops)
@@ -123,39 +125,65 @@ var (
 	cpu   float64
 )
 
+type GocvInfo struct {
+	FpsCount      float64
+	CaptureCostMs float64
+	FramesElapsed int
+	Debugging     bool
+
+	Cpu                        float64
+	WeaponsMatchingCostTotalMs float64
+	WeaponsMatched             int
+	WeaponsMatchingCostAvgMs   float64
+}
+
+const GOCV_INFO_TEMPLATE = `| FPS: {{printf "%05.2f" .FpsCount}} | 截图: {{printf "%.1f" .CaptureCostMs}}ms | 0x{{printf "%04X" .FramesElapsed}} |{{if .Debugging}} DEBUG |{{end}}
+| CPU: {{printf "%04.1f" .Cpu}}% | 匹配: {{printf "%.1f" .WeaponsMatchingCostTotalMs}}ms/{{.WeaponsMatched}}={{printf "%.2f" .WeaponsMatchingCostAvgMs}}ms |`
+
+var (
+	gocvInfoTmpl = textTemplate.Must(textTemplate.New("GocvInfo").Parse(GOCV_INFO_TEMPLATE))
+	gocvInfo     GocvInfo
+	gocvInfoBuf  bytes.Buffer
+)
+
 func layoutGocvInfo(gtx layout.Context) {
 	weaponsMu.RLock()
 	defer weaponsMu.RUnlock()
 
 	const ms = float64(time.Millisecond)
-	var debugLabel string
-	if debug {
-		debugLabel = "DEBUG"
-	}
-	var inputtingLabel string
+
+	gocvInfoBuf.Reset()
+
+	gocvInfo.FpsCount = cvFps.Count()
+	gocvInfo.CaptureCostMs = float64(captureCost) / ms
+	gocvInfo.FramesElapsed = capturer.FramesElapsed
+	gocvInfo.Debugging = debug
+
+	gocvInfo.Cpu = cpu
+	gocvInfo.WeaponsMatchingCostTotalMs = float64(weaponsMatchingCost) / ms
+	gocvInfo.WeaponsMatched = weaponsMatched
+	gocvInfo.WeaponsMatchingCostAvgMs = float64(weaponsMatchingCost) / float64(weaponsMatched) / ms
+
+	panicIf(gocvInfoTmpl.Execute(&gocvInfoBuf, &gocvInfo))
+
+	gocvInfoBuf.WriteString("\n\n")
 	if inputting {
 		if !inputMainOrAlt {
-			inputtingLabel = "|M|: "
+			gocvInfoBuf.WriteString("|M|: ")
 		} else {
-			inputtingLabel = "|A|: "
+			gocvInfoBuf.WriteString("|A|: ")
 		}
+		gocvInfoBuf.Write(inputBuf.Bytes())
 	}
-	status := fmt.Sprintf(
-		"| FPS: %05.2f | 截图: %.1fms | 0x%.4X | %s\n| CPU: %04.1f%% | 匹配: %.1fms/%d=%.2fms |\n\n%s%s\n\n%s",
-		cvFps.Count(),
-		float64(captureCost)/ms,
-		capturer.FramesElapsed,
-		debugLabel,
 
-		cpu,
-		float64(templatesMatchingCost)/ms, weaponMatched,
-		float64(templatesMatchingCost)/float64(weaponMatched)/ms,
+	gocvInfoBuf.WriteString("\n\n")
+	gocvInfoBuf.Write(luaFileContent)
 
-		inputtingLabel, inputBuf.Bytes(),
-
-		luaFileContent,
-	)
-	widgets.Label(FONT_SIZE*1.5, status).Layout(gtx)
+	widgets.Label(
+		FONT_SIZE*1.5,
+		// unsafe.String(unsafe.SliceData(gocvInfoBuf.Bytes()), gocvInfoBuf.Len()),
+		gocvInfoBuf.String(),
+	).Layout(gtx)
 
 	roiRectScaled := scaleRect(
 		capturer.Bounds().Max, gtx.Constraints.Max,
