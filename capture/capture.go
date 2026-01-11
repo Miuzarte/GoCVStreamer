@@ -75,16 +75,24 @@ func (ss *Capturer) new() (err error) {
 	return nil
 }
 
-func (ss *Capturer) Close() {
+func (ss *Capturer) Close() (err error) {
+	var ret1, ret2 int32
 	if ss.ddup != nil {
 		ss.ddup.Release()
 	}
 	if ss.deviceCtx != nil {
-		ss.deviceCtx.Release()
+		ret1 = ss.deviceCtx.Release()
 	}
 	if ss.device != nil {
-		ss.device.Release()
+		ret2 = ss.device.Release()
 	}
+	if ret1 != 0 {
+		return fmt.Errorf("ret1 (%d) != 0", ret1)
+	}
+	if ret2 != 0 {
+		return fmt.Errorf("ret2 (%d) != 0", ret2)
+	}
+	return nil
 }
 
 func (ss *Capturer) Bounds() image.Rectangle {

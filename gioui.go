@@ -167,7 +167,7 @@ func layoutGocvInfo(gtx layout.Context) {
 	gocvInfo.FrametimeMs = float64(frametime) / ms
 	gocvInfo.CaptureCostMs = float64(captureCost) / ms
 	gocvInfo.FramesElapsed = capturer.FramesElapsed
-	gocvInfo.Debugging = debug
+	gocvInfo.Debugging = debugging
 
 	gocvInfo.Cpu = cpu
 

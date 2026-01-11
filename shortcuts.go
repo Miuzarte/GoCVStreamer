@@ -36,7 +36,7 @@ func shortcutListWeapons(key.Name, key.Modifiers) {
 			continue
 		}
 
-		speedMain, speedMainF, speedAlt, speedAltF := w.GetAllSpeeds(debug)
+		speedMain, speedMainF, speedAlt, speedAltF := w.GetAllSpeeds(debugging)
 		fmt.Fprintf(log.Out,
 			"[%0*d] {%s_%s_%02d.%d_%02d.%d} %-*s %.2f%%\n",
 			indexLength, i,
@@ -75,8 +75,8 @@ func shortcutToggleDraw(key.Name, key.Modifiers) {
 }
 
 func shortcutToggleDebug(key.Name, key.Modifiers) {
-	debug = !debug
-	log.Infof("debugging: %v", debug)
+	debugging = !debugging
+	log.Infof("debugging: %v", debugging)
 	forceUpdate = true
 }
 
@@ -164,7 +164,7 @@ var (
 func shortcutStartInput(k key.Name, m key.Modifiers) {
 	switch k {
 	case "I", "i": // start
-		if !debug {
+		if !debugging {
 			log.Warnf("not in debugging")
 			return
 		}

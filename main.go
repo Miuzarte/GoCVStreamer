@@ -9,11 +9,10 @@ import (
 	"image/color"
 	"io"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"reflect"
 	"runtime"
-	dbg "runtime/debug"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,6 +24,7 @@ import (
 	"gioui.org/op"
 
 	"github.com/Miuzarte/GoCVStreamer/capture"
+	cwg "github.com/Miuzarte/GoCVStreamer/contextWaitGroup"
 	"github.com/fsnotify/fsnotify"
 
 	"github.com/Miuzarte/SimpleLog"
@@ -40,7 +40,7 @@ const (
 	MATCHING_MISJUDGEMENT_ALERT = false
 )
 
-var debug = DEBUG
+var debugging = DEBUGGING
 
 const SAMPLE_RATE = 5
 
@@ -86,7 +86,7 @@ const WEAPON_INDEX_NONE = -1
 const MATCH_THRESHOLD = 0.9
 
 var (
-	lastGCStats         dbg.GCStats
+	lastGCStats         debug.GCStats
 	captureCost         time.Duration
 	weaponsMatchingCost time.Duration
 	highLatencyCount    int
@@ -102,10 +102,10 @@ var (
 	weaponIndexSignal   = make(chan int, 1)
 )
 
-var _ = debugWaitForInput()
+var _ = debuggingWaitForInput()
 
-func debugWaitForInput() (_ struct{}) {
-	if !debug {
+func debuggingWaitForInput() (_ struct{}) {
+	if !debugging {
 		return
 	}
 	log.Debugf("pid: %d, ppid: %d", processId, parentProcessId)
@@ -220,39 +220,49 @@ func main() {
 		weaponsMu.Lock()
 		defer weaponsMu.Unlock()
 
-		capturer.Close()
-		panicIf(weapons.Close())
-		panicIf(luaFile.Close())
+		var err error
+		err = capturer.Close()
+		if err != nil {
+			log.Errorf("failed to close capturer: %v")
+		}
+		err = weapons.Close()
+		if err != nil {
+			log.Errorf("failed to close weapons: %v")
+		}
+		err = luaFile.Close()
+		if err != nil {
+			log.Errorf("failed to close luaFile: %v")
+		}
 	}()
 
-	wg := sync.WaitGroup{}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	ctx, _ = signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
+	cwg := cwg.New(context.Background())
+	cwg.WithSignal(syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
+	defer cwg.Cancel()
 
-	wg.Go(func() {
+	cwg.Go(func(ctx context.Context) {
 		cpuMeasureLoop(ctx)
 	})
-	wg.Go(func() {
+	cwg.Go(func(ctx context.Context) {
 		luaSwitchingLoop(ctx)
 	})
-	wg.Go(func() {
-		windowLoop(ctx, cancel)
+	cwg.Go(func(ctx context.Context) {
+		defer cwg.Cancel()
+		windowLoop(ctx)
 	})
-	wg.Go(func() {
+	cwg.Go(func(ctx context.Context) {
 		<-ctx.Done()
 		// using ctrl c to exit in console
 		// telling the window on background to response
 		window.Invalidate()
 	})
-	wg.Go(func() {
+	cwg.Go(func(ctx context.Context) {
 		tmplWatchLoop(ctx)
 	})
-	wg.Go(func() {
+	cwg.Go(func(ctx context.Context) {
 		tmplMatchLoop(ctx)
 	})
 
-	wg.Wait()
+	cwg.Wait()
 }
 
 func cpuMeasureLoop(ctx context.Context) {
@@ -301,21 +311,20 @@ func luaSwitchingLoop(ctx context.Context) {
 			forceUpdate = false
 		} else if newIndex == luaFileContentIndex {
 			return
+		} else {
+			if MATCHING_MISJUDGEMENT_ALERT &&
+				luaFileContentIndex >= 0 && newIndex >= 0 {
+				os.Stderr.Write([]byte{'\a'})
+			}
+			log.Debugf(
+				"switching from [%d]%s(%05.2f%%) to [%d]%s(%05.2f%%)",
+				luaFileContentIndex, fromName, fromVal*100,
+				newIndex, toName, toVal*100,
+			)
 		}
-
-		if MATCHING_MISJUDGEMENT_ALERT &&
-			luaFileContentIndex >= 0 && newIndex >= 0 {
-			os.Stderr.Write([]byte{'\a'})
-		}
-
-		log.Debugf(
-			"switching from [%d]%s(%05.2f%%) to [%d]%s(%05.2f%%)",
-			luaFileContentIndex, fromName, fromVal*100,
-			newIndex, toName, toVal*100,
-		)
 
 		// no debounce when debugging
-		if !debug && luaFileContentIndex >= 0 && newIndex == WEAPON_INDEX_NONE {
+		if !debugging && luaFileContentIndex >= 0 && newIndex == WEAPON_INDEX_NONE {
 			// from notnone to none
 			if !luaToNoneDebounce {
 				// going to none, enter debounce
@@ -335,36 +344,22 @@ func luaSwitchingLoop(ctx context.Context) {
 		}
 
 		luaFileContentIndex = newIndex
-		luaFileContent = to.Lua(debug)
+		luaFileContent = to.Lua(debugging)
 
 		err := luaFile.Truncate(0)
-		if err != nil {
-			log.Warnf("luaFile failed to Truncate: %v", err)
-			return
-		}
+		panicIf(err)
 		_, err = luaFile.Seek(0, io.SeekStart)
-		if err != nil {
-			log.Warnf("luaFile failed to Seek: %v", err)
-			return
-		}
-
+		panicIf(err)
 		_, err = luaFile.Write(luaFileContent)
-		if err != nil {
-			log.Warnf("luaFile failed to Write: %v", err)
-			return
-		}
+		panicIf(err)
 		err = luaFile.Sync()
-		if err != nil {
-			log.Warnf("luaFile failed to Sync: %v", err)
-			return
-		}
+		panicIf(err)
 	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-
 		case newIndex := <-weaponIndexSignal:
 			// using closure for mutex control
 			writeLua(newIndex)
@@ -372,8 +367,7 @@ func luaSwitchingLoop(ctx context.Context) {
 	}
 }
 
-func windowLoop(ctx context.Context, cancel context.CancelFunc) {
-	defer cancel()
+func windowLoop(ctx context.Context) {
 	var ops op.Ops
 	for {
 		select {
@@ -647,7 +641,7 @@ func tmplMatchLoop(ctx context.Context) {
 				return
 			}
 
-			dbg.ReadGCStats(&lastGCStats)
+			debug.ReadGCStats(&lastGCStats)
 
 			// screenshot
 			tStart := time.Now()
