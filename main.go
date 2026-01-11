@@ -2,18 +2,19 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
 	"io"
-	"math/bits"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"reflect"
 	"runtime"
+	dbg "runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -21,7 +22,6 @@ import (
 	"unsafe"
 
 	"gioui.org/app"
-	"gioui.org/io/key"
 	"gioui.org/op"
 
 	"github.com/Miuzarte/GoCVStreamer/capture"
@@ -36,12 +36,13 @@ import (
 )
 
 const (
-	DEBUG                       = false
 	DRAW_NEGATIVE_RESULT        = false
 	MATCHING_MISJUDGEMENT_ALERT = false
 )
 
 var debug = DEBUG
+
+const SAMPLE_RATE = 5
 
 const (
 	TEMPLATES_DIRECTORY     = "templates"
@@ -61,11 +62,14 @@ var (
 )
 
 var (
-	displayIndex = 0
-	capturer     *capture.Capturer
-	screenImage  *image.RGBA
-	origRoiRect  = image.Rect(1986+8, 1197+8, 2114-16, 1306-8)
-	roiRect      = origRoiRect
+	capturer    *capture.Capturer
+	screenImage *image.RGBA
+	drawEnabled = true
+	roiRectSize = image.Point{96, 96}
+	roiRectPos  = image.Point{2000, 1200}
+	// Xmid: 2045
+	defaultRoiRect = image.Rectangle{roiRectPos, roiRectPos.Add(roiRectSize)}
+	roiRect        = defaultRoiRect
 )
 
 var (
@@ -82,8 +86,11 @@ const WEAPON_INDEX_NONE = -1
 const MATCH_THRESHOLD = 0.9
 
 var (
+	lastGCStats         dbg.GCStats
 	captureCost         time.Duration
 	weaponsMatchingCost time.Duration
+	highLatencyCount    int
+	lastHighLatencyTime time.Time
 )
 
 var (
@@ -127,23 +134,62 @@ func init() {
 	panicIf(err)
 
 	numDisplays := screenshot.NumActiveDisplays()
-	log.Infof("num displays: %d", numDisplays)
-	var maxBounds image.Rectangle
-	var maxRes int
+	log.Infof("active displays: %d", numDisplays)
+	displayBoundaries := make([]image.Rectangle, numDisplays)
 	for i := range numDisplays {
-		bounds := screenshot.GetDisplayBounds(i)
-		size := bounds.Size()
-		res := size.X * size.Y
-		if res > maxRes {
-			maxBounds = bounds
-			maxRes = res
-			displayIndex = i
+		displayBoundaries[i] = screenshot.GetDisplayBounds(i)
+	}
+
+	displayIndex := 0
+	if numDisplays > 1 {
+		log.Info("multi displays detected")
+		for i := range numDisplays {
+			size := displayBoundaries[i].Size()
+			fmt.Fprintf(log.Out, "[%d] %dx%d (X:%d, Y:%d)\n", i, size.X, size.Y, displayBoundaries[i].Min.X, displayBoundaries[i].Min.Y)
+		}
+
+		reader := bufio.NewReader(os.Stdin)
+		for {
+			fmt.Fprintf(log.Out, "input index in range [0,%d]: ", numDisplays-1)
+			input, err := reader.ReadString('\n')
+			if err != nil && !errors.Is(err, io.EOF) {
+				log.Panicf("failed to read os.Stdin: %v", err)
+			}
+
+			input = strings.TrimSpace(input)
+			if input != "" {
+				index, err := strconv.Atoi(input)
+				if err != nil || index < 0 || index >= numDisplays {
+					log.Warnf("invalid input %q", input)
+					continue
+				}
+				displayIndex = index
+			} else {
+				// use the one with max resolution
+				maxRes := 0
+				for i := range numDisplays {
+					size := displayBoundaries[i].Size()
+					res := size.X * size.Y
+					if res > maxRes {
+						maxRes = res
+						displayIndex = i
+					}
+				}
+				log.Infof("auto selected display %d", displayIndex)
+			}
+
+			break
 		}
 	}
-	log.Infof("using display index: %d(%dx%d)", displayIndex, maxBounds.Dx(), maxBounds.Dy())
+
+	displayBounds := displayBoundaries[displayIndex]
+	log.Infof("using display [%d] (%dx%d)", displayIndex, displayBounds.Dx(), displayBounds.Dy())
 
 	capturer, err = capture.New(displayIndex)
 	panicIf(err)
+	if !capturer.Bounds().Eq(displayBounds) {
+		log.Warnf("capturer.Bounds() (%v) != displayBounds (%v)", capturer.Bounds(), displayBounds)
+	}
 	screenImage = image.NewRGBA(capturer.Bounds())
 
 	err = windows.SetPriorityClass(windows.CurrentProcess(), windows.HIGH_PRIORITY_CLASS)
@@ -371,152 +417,6 @@ func windowLoop(ctx context.Context, cancel context.CancelFunc) {
 	}
 }
 
-var (
-	onceWeaponNameLongest sync.Once
-	weaponNameLongest     int
-)
-
-func shortcutListWeapons(key.Name, key.Modifiers) {
-	const indexLength = 3
-
-	weaponsMu.RLock()
-	defer weaponsMu.RUnlock()
-
-	onceWeaponNameLongest.Do(func() {
-		for _, w := range weapons {
-			weaponNameLongest = max(weaponNameLongest, len(w.Name))
-		}
-	})
-
-	skipped := 0
-	for i, w := range weapons {
-		if w.SpeedMain == 0 {
-			skipped++
-			continue
-		}
-
-		speedMain, speedMainF, speedAlt, speedAltF := w.GetAllSpeeds(debug)
-		fmt.Printf(
-			"[%0*d] {%s_%s_%02d.%d_%02d.%d} %-*s %.2f%%\n",
-			indexLength, i,
-			w.Mode.string(true), w.Type.string(true),
-			speedMain, speedMainF, speedAlt, speedAltF,
-			weaponNameLongest, w.Name,
-			w.Template.MaxVal*100,
-		)
-	}
-	if skipped > 0 {
-		log.Infof("skipped %d undefined weapon(s)", skipped)
-	}
-}
-
-// Deprecated: there is a slight memory leak
-func shortcutReloadWeapons(_ key.Name, mod key.Modifiers) {
-	if mod.Contain(key.ModCtrl | key.ModShift) {
-		loadTemplates()
-	}
-}
-
-func shortcutPrintProcess(key.Name, key.Modifiers) {
-	windowHandel = windows.GetForegroundWindow()
-	log.Infof("parent process id: %d", parentProcessId)
-	log.Infof("process id: %d", processId)
-	log.Infof("window handel: %#X", windowHandel)
-}
-
-func shortcutResetFreamsElapsed(key.Name, key.Modifiers) {
-	capturer.FramesElapsed = 0
-	log.Info("capturer.FramesElapsed reset")
-}
-
-var drawEnabled = true
-
-func shortcutToggleDraw(key.Name, key.Modifiers) {
-	drawEnabled = !drawEnabled
-}
-
-func shortcutToggleDebug(key.Name, key.Modifiers) {
-	debug = !debug
-	log.Infof("debugging: %v", debug)
-	forceUpdate = true
-}
-
-var showPosTill time.Time
-
-func shortcutMoveRoiRect(name key.Name, mod key.Modifiers) {
-	offset := 1
-	for range bits.OnesCount32(uint32(mod)) {
-		offset *= 4
-	}
-
-	var newRect image.Rectangle
-
-	switch name {
-	case "R", "r":
-		newRect = origRoiRect
-	case key.NameUpArrow:
-		newRect = roiRect.Sub(image.Pt(0, offset))
-	case key.NameDownArrow:
-		newRect = roiRect.Add(image.Pt(0, offset))
-	case key.NameLeftArrow:
-		newRect = roiRect.Sub(image.Pt(offset, 0))
-	case key.NameRightArrow:
-		newRect = roiRect.Add(image.Pt(offset, 0))
-	}
-
-	boundaryCheck(capturer.Bounds(), &newRect)
-	roiRect = newRect
-	showPosTill = time.Now().Add(time.Second * 3)
-	log.Debugf("roiRect: %v", roiRect)
-}
-
-func boundaryCheckPos(constraints image.Rectangle, pos *image.Point) {
-	pos.X = max(pos.X, constraints.Min.X)
-	pos.Y = max(pos.Y, constraints.Min.Y)
-	pos.X = min(pos.X, constraints.Max.X)
-	pos.Y = min(pos.Y, constraints.Max.Y)
-}
-
-func boundaryCheck(constraints image.Rectangle, rect *image.Rectangle) {
-	size := rect.Size()
-	boundaryCheckPos(constraints, &rect.Max)
-	rect.Min = rect.Max.Sub(size)
-	boundaryCheckPos(constraints, &rect.Min)
-	rect.Max = rect.Min.Add(size)
-}
-
-func shortcutSetWda(_ key.Name, mod key.Modifiers) {
-	if windowHandel == 0 {
-		windowHandel = windows.GetForegroundWindow()
-	}
-
-	currWda, err := GetWindowDisplayAffinity(windowHandel)
-	if err != nil {
-		log.Errorf("failed to GetWindowDisplayAffinity: %v", err)
-		return
-	}
-
-	switch currWda {
-	case WDA_NONE:
-		var toWda uint32
-		if !mod.Contain(key.ModShift) {
-			toWda = WDA_EXCLUDEFROMCAPTURE
-			log.Info("wda set to WDA_EXCLUDEFROMCAPTURE")
-		} else {
-			toWda = WDA_MONITOR
-			log.Info("wda set to WDA_MONITOR")
-		}
-		err = SetWindowDisplayAffinity(windowHandel, toWda)
-	case WDA_EXCLUDEFROMCAPTURE:
-		log.Info("wda set to WDA_NONE")
-		err = SetWindowDisplayAffinity(windowHandel, WDA_NONE)
-	}
-
-	if err != nil {
-		log.Errorf("failed to SetWindowDisplayAffinity: %v", err)
-	}
-}
-
 func modWeapon(mainOrAlt bool, newSpeed string) {
 	if luaFileContentIndex == WEAPON_INDEX_NONE {
 		log.Warn("weapon unselected")
@@ -568,49 +468,6 @@ func modWeapon(mainOrAlt bool, newSpeed string) {
 	}
 
 	forceUpdate = true
-}
-
-var (
-	inputting      bool
-	inputMainOrAlt bool // true for alt
-	inputBuf       bytes.Buffer
-)
-
-func shortcutStartInput(k key.Name, m key.Modifiers) {
-	switch k {
-	case "I", "i": // start
-		if !debug {
-			log.Warnf("not in debugging")
-			return
-		}
-		inputting = true
-		inputMainOrAlt = m.Contain(key.ModShift)
-		return
-
-	case key.NameDeleteBackward:
-		if inputBuf.Len() == 0 {
-			return
-		}
-		inputBuf.Truncate(inputBuf.Len() - 1)
-
-	case key.NameReturn: // confirm
-		if !inputting {
-			return
-		}
-		inputting = false
-		if inputBuf.Len() == 0 {
-			log.Warn("empty input")
-			return
-		}
-		modWeapon(inputMainOrAlt, inputBuf.String())
-		inputBuf.Reset()
-
-	case "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ".", "-":
-		if inputting {
-			inputBuf.WriteString(string(k))
-		}
-		return
-	}
 }
 
 func tmplWatchLoop(ctx context.Context) {
@@ -777,7 +634,7 @@ func tmplMatchLoop(ctx context.Context) {
 	capture := gocv.NewMat()
 	defer capture.Close()
 
-	ticker := time.NewTicker(time.Millisecond * 200)
+	ticker := time.NewTicker(time.Second / SAMPLE_RATE)
 	defer ticker.Stop()
 
 	for {
@@ -790,6 +647,8 @@ func tmplMatchLoop(ctx context.Context) {
 				return
 			}
 
+			dbg.ReadGCStats(&lastGCStats)
+
 			// screenshot
 			tStart := time.Now()
 			err := doScreenshot(screenImage, &capture)
@@ -799,6 +658,10 @@ func tmplMatchLoop(ctx context.Context) {
 			}
 			panicIf(err)
 
+			if !roiRect.In(capturer.Bounds()) {
+				log.Errorf("roiRect %v is not fully contained in screen bounds %v", roiRect, capturer.Bounds())
+				continue
+			}
 			// template match
 			captureRoi := capture.Region(roiRect)
 			tStart = time.Now()
@@ -818,10 +681,15 @@ func tmplMatchLoop(ctx context.Context) {
 	}
 }
 
-func imageToMat(img image.Image, dst *gocv.Mat) error {
+var imageToMatWarnOnce sync.Once
+
+func imageToMat(img image.Image, dst *gocv.Mat) (err error) {
+	var src gocv.Mat
+
 	bounds := img.Bounds()
 	x := bounds.Dx()
 	y := bounds.Dy()
+
 	switch img.ColorModel() {
 	case color.RGBAModel:
 		m, res := img.(*image.RGBA)
@@ -829,15 +697,16 @@ func imageToMat(img image.Image, dst *gocv.Mat) error {
 			return fmt.Errorf("image color format error")
 		}
 		// speed up the conversion process of RGBA format
-		src, err := gocv.NewMatFromBytes(y, x, gocv.MatTypeCV8UC4, m.Pix)
+		src, err = gocv.NewMatFromBytes(y, x, gocv.MatTypeCV8UC4, m.Pix)
 		if err != nil {
 			return err
 		}
 		defer src.Close()
 
-		gocv.CvtColor(src, dst, gocv.ColorRGBAToBGR)
-
 	default:
+		imageToMatWarnOnce.Do(func() {
+			log.Warn("unexpected image color model, conversion performance may be affected")
+		})
 		data := make([]byte, 0, x*y*3)
 		for j := bounds.Min.Y; j < bounds.Max.Y; j++ {
 			for i := bounds.Min.X; i < bounds.Max.X; i++ {
@@ -851,7 +720,8 @@ func imageToMat(img image.Image, dst *gocv.Mat) error {
 		}
 		defer src.Close()
 	}
-	return nil
+
+	return gocv.CvtColor(src, dst, gocv.ColorRGBAToBGR)
 }
 
 func doScreenshot(screenImage *image.RGBA, display *gocv.Mat) error {

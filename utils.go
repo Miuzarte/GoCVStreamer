@@ -24,7 +24,7 @@ func init() {
 	}
 }
 
-func FastItoa(i int) string {
+func FastItoa[T int | uint](i T) string {
 	if i >= 0 {
 		return FastItoaTablePos[i]
 	} else {
@@ -32,12 +32,6 @@ func FastItoa(i int) string {
 	}
 }
 
-func FastItoa2(i int, u uint) (string, string) {
-	return FastItoa(i), FastItoaTablePos[u]
-}
-
 func FastItoa4(i1 int, u1 uint, i2 int, u2 uint) (s1, s2, s3, s4 string) {
-	s1, s2 = FastItoa2(i1, u1)
-	s3, s4 = FastItoa2(i2, u2)
-	return
+	return FastItoa(i1), FastItoa(u1), FastItoa(i2), FastItoa(u2)
 }

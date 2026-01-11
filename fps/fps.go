@@ -6,8 +6,10 @@ import (
 
 type state struct {
 	fps        float64
+	frametime  time.Duration
 	frameCount int
-	lastTime   time.Time
+	lastCount  time.Time
+	lastUpdate time.Time
 }
 
 type counter struct {
@@ -22,16 +24,19 @@ func NewCounter(updateInterval time.Duration) counter {
 func (fc *counter) update() {
 	fc.frameCount++
 	now := time.Now()
-	elapsed := now.Sub(fc.lastTime)
 
+	elapsed := now.Sub(fc.lastUpdate)
 	if elapsed >= fc.UpdateInterval {
 		fc.fps = float64(fc.frameCount) / elapsed.Seconds()
+		fc.frametime = now.Sub(fc.lastCount)
 		fc.frameCount = 0
-		fc.lastTime = now
+		fc.lastUpdate = now
 	}
+
+	fc.lastCount = now
 }
 
-func (fc *counter) Count() float64 {
+func (fc *counter) Count() (fps float64, frametime time.Duration) {
 	fc.update()
-	return fc.fps
+	return fc.fps, fc.frametime
 }

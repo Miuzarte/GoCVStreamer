@@ -121,24 +121,31 @@ func layoutDisplay(gtx layout.Context, img image.Image) {
 }
 
 var (
-	cvFps = fps.NewCounter(time.Second / 2)
-	cpu   float64
+	fpsCounter = fps.NewCounter(time.Second / SAMPLE_RATE)
+	cpu        float64
 )
 
 type GocvInfo struct {
 	FpsCount      float64
+	FrametimeMs   float64
 	CaptureCostMs float64
 	FramesElapsed int
 	Debugging     bool
 
-	Cpu                        float64
+	Cpu float64
+
+	NumGc        int
+	PauseAvgUs   float64
+	SinceLastGcS float64
+
 	WeaponsMatchingCostTotalMs float64
 	WeaponsMatched             int
 	WeaponsMatchingCostAvgMs   float64
 }
 
-const GOCV_INFO_TEMPLATE = `| FPS: {{printf "%05.2f" .FpsCount}} | 截图: {{printf "%.1f" .CaptureCostMs}}ms | 0x{{printf "%04X" .FramesElapsed}} |{{if .Debugging}} DEBUG |{{end}}
-| CPU: {{printf "%04.1f" .Cpu}}% | 匹配: {{printf "%.1f" .WeaponsMatchingCostTotalMs}}ms/{{.WeaponsMatched}}={{printf "%.2f" .WeaponsMatchingCostAvgMs}}ms |`
+const GOCV_INFO_TEMPLATE = //
+`| FPS: {{printf "%05.2f(%.1fms)" .FpsCount .FrametimeMs}} | 截图: {{printf "%.1f" .CaptureCostMs}}ms | 0x{{printf "%04X" .FramesElapsed}} |{{if .Debugging}} DEBUG |{{end}}
+| CPU: {{printf "%04.1f" .Cpu}}% | GC: {{printf "%d(avg: %.2fus, last: %.2fs)" .NumGc .PauseAvgUs .SinceLastGcS}} | 匹配: {{printf "%.1f" .WeaponsMatchingCostTotalMs}}ms/{{.WeaponsMatched}}={{printf "%.2f" .WeaponsMatchingCostAvgMs}}ms |`
 
 var (
 	gocvInfoTmpl = textTemplate.Must(textTemplate.New("GocvInfo").Parse(GOCV_INFO_TEMPLATE))
@@ -150,16 +157,24 @@ func layoutGocvInfo(gtx layout.Context) {
 	weaponsMu.RLock()
 	defer weaponsMu.RUnlock()
 
+	now := time.Now()
 	const ms = float64(time.Millisecond)
 
 	gocvInfoBuf.Reset()
 
-	gocvInfo.FpsCount = cvFps.Count()
+	var frametime time.Duration
+	gocvInfo.FpsCount, frametime = fpsCounter.Count()
+	gocvInfo.FrametimeMs = float64(frametime) / ms
 	gocvInfo.CaptureCostMs = float64(captureCost) / ms
 	gocvInfo.FramesElapsed = capturer.FramesElapsed
 	gocvInfo.Debugging = debug
 
 	gocvInfo.Cpu = cpu
+
+	gocvInfo.NumGc = int(lastGCStats.NumGC)
+	gocvInfo.PauseAvgUs = float64(lastGCStats.PauseTotal) / float64(lastGCStats.NumGC) / float64(time.Microsecond)
+	gocvInfo.SinceLastGcS = now.Sub(lastGCStats.LastGC).Seconds()
+
 	gocvInfo.WeaponsMatchingCostTotalMs = float64(weaponsMatchingCost) / ms
 	gocvInfo.WeaponsMatched = weaponsMatched
 	gocvInfo.WeaponsMatchingCostAvgMs = float64(weaponsMatchingCost) / float64(weaponsMatched) / ms
