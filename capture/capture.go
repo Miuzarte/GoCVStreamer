@@ -30,19 +30,23 @@ func New(displayIndex int) (ss *Capturer, err error) {
 	if numDisplays <= 0 {
 		log.Fatal("screenshot.NumActiveDisplays() <= 0")
 	}
+	log.Debugf("numDisplays: %d", numDisplays)
 	maxIndex := numDisplays - 1
 	if displayIndex > maxIndex {
 		return nil, fmt.Errorf("display index [%d] out of bounds: %d", displayIndex, numDisplays)
 	}
 
-	// output dup has a reverse order of index (?not tested with more than 2 monitors)
-	displayIndex = maxIndex - displayIndex
+	/*
+		// output dup has a reverse order of index (?not tested with more than 2 monitors)
+		displayIndex = maxIndex - displayIndex
+		log.Debugf("actual displayIndex: %d", displayIndex)
+	*/
 
 	ss = &Capturer{displayIndex: displayIndex}
-	return ss, ss.new()
+	return ss, ss.init()
 }
 
-func (ss *Capturer) new() (err error) {
+func (ss *Capturer) init() (err error) {
 	ss.Close()
 
 	// Make thread PerMonitorV2 Dpi aware if supported on OS
@@ -131,7 +135,7 @@ func (ss *Capturer) getImage(img *image.RGBA) error {
 			and create a new IDXGIOutputDuplication for the new content.
 		*/
 		log.Debugf("renewing shooter due to: %v", err)
-		err = ss.new()
+		err = ss.init()
 		if err != nil {
 			return err
 		} else {

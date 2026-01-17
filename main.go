@@ -42,7 +42,10 @@ const (
 
 var debugging = DEBUGGING
 
-const SAMPLE_RATE = 5
+const (
+	SAMPLE_RATE      = 5
+	SAMPLE_FREQUENCY = time.Second / SAMPLE_RATE
+)
 
 const (
 	TEMPLATES_DIRECTORY     = "templates"
@@ -65,7 +68,7 @@ var (
 	capturer    *capture.Capturer
 	screenImage *image.RGBA
 	drawEnabled = true
-	roiRectSize = image.Point{96, 96}
+	roiRectSize = image.Point{8 * 11, 8 * 13}
 	roiRectPos  = image.Point{2000, 1200}
 	// Xmid: 2045
 	defaultRoiRect = image.Rectangle{roiRectPos, roiRectPos.Add(roiRectSize)}
@@ -75,8 +78,8 @@ var (
 var (
 	weaponsMu      sync.RWMutex
 	weapons        Weapons
-	weaponsMatched = 1
 	weaponIndex    int
+	weaponsMatched int
 	weaponFound    bool
 )
 
@@ -628,7 +631,7 @@ func tmplMatchLoop(ctx context.Context) {
 	capture := gocv.NewMat()
 	defer capture.Close()
 
-	ticker := time.NewTicker(time.Second / SAMPLE_RATE)
+	ticker := time.NewTicker(SAMPLE_FREQUENCY)
 	defer ticker.Stop()
 
 	for {
@@ -718,12 +721,12 @@ func imageToMat(img image.Image, dst *gocv.Mat) (err error) {
 	return gocv.CvtColor(src, dst, gocv.ColorRGBAToBGR)
 }
 
-func doScreenshot(screenImage *image.RGBA, display *gocv.Mat) error {
-	err := capturer.GetImage(screenImage)
+func doScreenshot(dstImage *image.RGBA, dstMat *gocv.Mat) error {
+	err := capturer.GetImage(dstImage)
 	if err != nil {
 		return err
 	}
-	err = imageToMat(screenImage, display)
+	err = imageToMat(dstImage, dstMat)
 	if err != nil {
 		return err
 	}
@@ -732,7 +735,7 @@ func doScreenshot(screenImage *image.RGBA, display *gocv.Mat) error {
 
 var lastSuccessfulTempl int
 
-func doMatchWeapon(captureRoi gocv.Mat) (templateIndex, templateMatched int, found bool) {
+func doMatchWeapon(image gocv.Mat) (templateIndex, templateMatched int, found bool) {
 	weaponsMu.RLock()
 	defer weaponsMu.RUnlock()
 
@@ -744,7 +747,7 @@ func doMatchWeapon(captureRoi gocv.Mat) (templateIndex, templateMatched int, fou
 		templateIndex = i
 
 		tmpl := weapons[i]
-		panicIf(tmpl.Template.Match(captureRoi, method))
+		panicIf(tmpl.Template.Match(image, method))
 
 		templateMatched++
 

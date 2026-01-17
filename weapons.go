@@ -262,14 +262,14 @@ const DEFAULT_CONTENT_SEMI_AUTO = "SAM=-1" + "\n" +
 
 const DEFAULT_CONTENT = DEFAULT_CONTENT_FULL_AUTO + DEFAULT_CONTENT_SEMI_AUTO
 
-func (w *Weapon) Lua(debugging bool) []byte {
+func (w *Weapon) Lua(orig bool) []byte {
 	if w == nil {
 		return []byte(DEFAULT_CONTENT)
 	}
 
 	w.luaBuf.Reset()
 
-	speedMain, speedMainF, speedAlt, speedAltF := FastItoa4(w.GetAllSpeeds(debugging))
+	speedMain, speedMainF, speedAlt, speedAltF := FastItoa4(w.GetAllSpeeds(orig))
 
 	switch w.Mode {
 	case WEAPON_MODE_FULL_AUTO:

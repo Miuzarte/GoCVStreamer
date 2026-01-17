@@ -121,7 +121,7 @@ func layoutDisplay(gtx layout.Context, img image.Image) {
 }
 
 var (
-	fpsCounter = fps.NewCounter(time.Second / SAMPLE_RATE)
+	fpsCounter = fps.NewCounter(SAMPLE_FREQUENCY)
 	cpu        float64
 )
 
@@ -157,8 +157,8 @@ func layoutGocvInfo(gtx layout.Context) {
 	weaponsMu.RLock()
 	defer weaponsMu.RUnlock()
 
-	now := time.Now()
 	const ms = float64(time.Millisecond)
+	const us = float64(time.Microsecond)
 
 	gocvInfoBuf.Reset()
 
@@ -172,8 +172,8 @@ func layoutGocvInfo(gtx layout.Context) {
 	gocvInfo.Cpu = cpu
 
 	gocvInfo.NumGc = int(lastGCStats.NumGC)
-	gocvInfo.PauseAvgUs = float64(lastGCStats.PauseTotal) / float64(lastGCStats.NumGC) / float64(time.Microsecond)
-	gocvInfo.SinceLastGcS = now.Sub(lastGCStats.LastGC).Seconds()
+	gocvInfo.PauseAvgUs = float64(lastGCStats.PauseTotal) / float64(lastGCStats.NumGC) / us
+	gocvInfo.SinceLastGcS = time.Since(lastGCStats.LastGC).Seconds()
 
 	gocvInfo.WeaponsMatchingCostTotalMs = float64(weaponsMatchingCost) / ms
 	gocvInfo.WeaponsMatched = weaponsMatched

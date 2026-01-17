@@ -60,9 +60,8 @@ func shortcutReloadWeapons(_ key.Name, mod key.Modifiers) {
 
 func shortcutPrintProcess(key.Name, key.Modifiers) {
 	windowHandel = windows.GetForegroundWindow()
-	log.Infof("parent process id: %d", parentProcessId)
-	log.Infof("process id: %d", processId)
-	log.Infof("window handel: %#X", windowHandel)
+	log.Infof("parentProcessId: %d, processId: %d, windowHandel: %d",
+		parentProcessId, processId, windowHandel)
 }
 
 func shortcutResetFreamsElapsed(key.Name, key.Modifiers) {
