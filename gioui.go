@@ -121,7 +121,7 @@ func layoutDisplay(gtx layout.Context, img image.Image) {
 }
 
 var (
-	fpsCounter = fps.NewCounter(SAMPLE_FREQUENCY)
+	fpsCounter = fps.NewCounter(SAMPLE_INTERVAL)
 	cpu        float64
 )
 

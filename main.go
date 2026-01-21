@@ -43,9 +43,14 @@ const (
 var debugging = DEBUGGING
 
 const (
-	SAMPLE_RATE      = 5
-	SAMPLE_FREQUENCY = time.Second / SAMPLE_RATE
+	SAMPLE_RATE                  = 5 // Hz
+	SAMPLE_INTERVAL              = time.Second / SAMPLE_RATE
+	SAMPLE_RATE_IDLE             = 2 // Hz
+	SAMPLE_INTERVAL_IDLE         = time.Second / SAMPLE_RATE_IDLE
+	SAMPLE_RATE_TO_IDLE_DURATION = time.Second * 5
 )
+
+var inIdle = false
 
 const (
 	TEMPLATES_DIRECTORY     = "templates"
@@ -631,15 +636,44 @@ func tmplMatchLoop(ctx context.Context) {
 	capture := gocv.NewMat()
 	defer capture.Close()
 
-	ticker := time.NewTicker(SAMPLE_FREQUENCY)
-	defer ticker.Stop()
+	tickerNormal := time.NewTicker(SAMPLE_INTERVAL)
+	defer tickerNormal.Stop()
+	tickerIdle := time.NewTicker(SAMPLE_INTERVAL_IDLE)
+	defer tickerIdle.Stop()
+	ticker := make(chan time.Time, 2)
+	defer close(ticker)
+
+	lastFoundTime := time.Now()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 
-		case _, ok := <-ticker.C:
+		case t, ok := <-tickerNormal.C:
+			if !ok {
+				return
+			}
+			if inIdle {
+				continue
+			}
+			select {
+			case ticker <- t:
+			default:
+			}
+		case t, ok := <-tickerIdle.C:
+			if !ok {
+				return
+			}
+			if !inIdle {
+				continue
+			}
+			select {
+			case ticker <- t:
+			default:
+			}
+
+		case _, ok := <-ticker:
 			if !ok {
 				return
 			}
@@ -668,8 +702,17 @@ func tmplMatchLoop(ctx context.Context) {
 
 			// output
 			if weaponFound {
+				// exit idle
+				lastFoundTime = time.Now()
+				inIdle = false
 				weaponIndexSignal <- weaponIndex
 			} else {
+				// failed for a period of time,
+				// reduce performance consumption in idle state
+				// no idle when debugging
+				if time.Since(lastFoundTime) > SAMPLE_RATE_TO_IDLE_DURATION && !debugging {
+					inIdle = true
+				}
 				weaponIndexSignal <- WEAPON_INDEX_NONE
 			}
 
