@@ -339,7 +339,7 @@ func parseFileName(path string) (name string, params [WEAPON_PARAMS_NUM]string, 
 }
 
 func (ws *Weapons) Append(path string) (err error) {
-	w := &Weapon{}
+	w := new(Weapon{})
 
 	err = w.DecodeFrom(path)
 	if err != nil {

@@ -42,7 +42,7 @@ func New(displayIndex int) (ss *Capturer, err error) {
 		log.Debugf("actual displayIndex: %d", displayIndex)
 	*/
 
-	ss = &Capturer{displayIndex: displayIndex}
+	ss = new(Capturer{displayIndex: displayIndex})
 	return ss, ss.init()
 }
 
