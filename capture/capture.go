@@ -5,16 +5,16 @@ import (
 	"image"
 	"sync"
 
-	"github.com/Miuzarte/SimpleLog"
+	"github.com/Miuzarte/GoCVStreamer/logger"
 	"github.com/kbinani/screenshot"
 	"github.com/kirides/go-d3d/d3d11"
 	"github.com/kirides/go-d3d/outputduplication"
 	"github.com/kirides/go-d3d/win"
 )
 
-var log = SimpleLog.New("[Capture]", true, false)
+var log = logger.New("Capture")
 
-type Capturer struct {
+type DxgiDesktopDuplicator struct {
 	FramesElapsed int
 
 	displayIndex int
@@ -25,12 +25,15 @@ type Capturer struct {
 	mu           sync.Mutex
 }
 
-func New(displayIndex int) (ss *Capturer, err error) {
+func New(displayIndex int) (ss *DxgiDesktopDuplicator, err error) {
 	numDisplays := screenshot.NumActiveDisplays()
 	if numDisplays <= 0 {
-		log.Fatal("screenshot.NumActiveDisplays() <= 0")
+		log.Fatal().
+			Msg("screenshot.NumActiveDisplays() <= 0")
 	}
-	log.Debugf("numDisplays: %d", numDisplays)
+	log.Debug().
+		Int("numDisplays", numDisplays).
+		Msg("active displays")
 	maxIndex := numDisplays - 1
 	if displayIndex > maxIndex {
 		return nil, fmt.Errorf("display index [%d] out of bounds: %d", displayIndex, numDisplays)
@@ -39,14 +42,16 @@ func New(displayIndex int) (ss *Capturer, err error) {
 	/*
 		// output dup has a reverse order of index (?not tested with more than 2 monitors)
 		displayIndex = maxIndex - displayIndex
-		log.Debugf("actual displayIndex: %d", displayIndex)
+		log.Debug().
+			Int("actualDisplayIndex", displayIndex).
+			Msg("actual display index")
 	*/
 
-	ss = new(Capturer{displayIndex: displayIndex})
+	ss = new(DxgiDesktopDuplicator{displayIndex: displayIndex})
 	return ss, ss.init()
 }
 
-func (ss *Capturer) init() (err error) {
+func (ss *DxgiDesktopDuplicator) init() (err error) {
 	ss.Close()
 
 	// Make thread PerMonitorV2 Dpi aware if supported on OS
@@ -54,9 +59,12 @@ func (ss *Capturer) init() (err error) {
 	if win.IsValidDpiAwarenessContext(win.DpiAwarenessContextPerMonitorAwareV2) {
 		_, err := win.SetThreadDpiAwarenessContext(win.DpiAwarenessContextPerMonitorAwareV2)
 		if err != nil {
-			log.Warnf("could not set thread DPI awareness to PerMonitorAwareV2: %v", err)
+			log.Warn().
+				Err(err).
+				Msg("could not set thread DPI awareness to PerMonitorAwareV2")
 		} else {
-			log.Debugf("enabled PerMonitorAwareV2 DPI awareness")
+			log.Debug().
+				Msg("enabled PerMonitorAwareV2 DPI awareness")
 		}
 	}
 
@@ -79,7 +87,7 @@ func (ss *Capturer) init() (err error) {
 	return nil
 }
 
-func (ss *Capturer) Close() (err error) {
+func (ss *DxgiDesktopDuplicator) Close() (err error) {
 	var ret1, ret2 int32
 	if ss.ddup != nil {
 		ss.ddup.Release()
@@ -99,7 +107,7 @@ func (ss *Capturer) Close() (err error) {
 	return nil
 }
 
-func (ss *Capturer) Bounds() image.Rectangle {
+func (ss *DxgiDesktopDuplicator) Bounds() image.Rectangle {
 	return ss.screenBounds
 }
 
@@ -107,13 +115,13 @@ func (ss *Capturer) Bounds() image.Rectangle {
 //
 //	runtime.LockOSThread()
 //	defer runtime.UnlockOSThread()
-func (ss *Capturer) GetImage(img *image.RGBA) error {
+func (ss *DxgiDesktopDuplicator) GetImage(img *image.RGBA) error {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
 	return ss.getImage(img)
 }
 
-func (ss *Capturer) getImage(img *image.RGBA) error {
+func (ss *DxgiDesktopDuplicator) getImage(img *image.RGBA) error {
 	err := ss.ddup.GetImage(img, 0)
 	if err == nil {
 		ss.FramesElapsed++
@@ -134,7 +142,9 @@ func (ss *Capturer) getImage(img *image.RGBA) error {
 			the application must release the IDXGIOutputDuplication interface
 			and create a new IDXGIOutputDuplication for the new content.
 		*/
-		log.Debugf("renewing shooter due to: %v", err)
+		log.Debug().
+			Err(err).
+			Msg("renewing duplicator")
 		err = ss.init()
 		if err != nil {
 			return err

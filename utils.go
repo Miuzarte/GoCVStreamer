@@ -6,7 +6,9 @@ import (
 
 func panicIf(err error) {
 	if err != nil {
-		log.Panic(err)
+		log.Panic().
+			Err(err).
+			Msg("panicIf")
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"image"
 	"math/bits"
+	"os"
 	"sync"
 	"time"
 
@@ -37,7 +38,7 @@ func shortcutListWeapons(key.Name, key.Modifiers) {
 		}
 
 		speedMain, speedMainF, speedAlt, speedAltF := w.GetAllSpeeds(debugging)
-		fmt.Fprintf(log.Out,
+		fmt.Fprintf(os.Stdout,
 			"[%0*d] {%s_%s_%02d.%d_%02d.%d} %-*s %.2f%%\n",
 			indexLength, i,
 			w.Mode.string(true), w.Type.string(true),
@@ -47,7 +48,9 @@ func shortcutListWeapons(key.Name, key.Modifiers) {
 		)
 	}
 	if skipped > 0 {
-		log.Infof("skipped %d undefined weapon(s)", skipped)
+		log.Info().
+			Int("skipped", skipped).
+			Msg("skipped undefined weapon(s)")
 	}
 }
 
@@ -60,13 +63,17 @@ func shortcutReloadWeapons(_ key.Name, mod key.Modifiers) {
 
 func shortcutPrintProcess(key.Name, key.Modifiers) {
 	windowHandel = windows.GetForegroundWindow()
-	log.Infof("parentProcessId: %d, processId: %d, windowHandel: %d",
-		parentProcessId, processId, windowHandel)
+	log.Info().
+		Int("parentProcessId", parentProcessId).
+		Int("processId", processId).
+		Uint64("windowHandel", uint64(windowHandel)).
+		Msg("process/window info")
 }
 
 func shortcutResetFreamsElapsed(key.Name, key.Modifiers) {
 	capturer.FramesElapsed = 0
-	log.Info("capturer.FramesElapsed reset")
+	log.Info().
+		Msg("capturer.FramesElapsed reset")
 }
 
 func shortcutToggleDraw(key.Name, key.Modifiers) {
@@ -75,7 +82,9 @@ func shortcutToggleDraw(key.Name, key.Modifiers) {
 
 func shortcutToggleDebug(key.Name, key.Modifiers) {
 	debugging = !debugging
-	log.Infof("debugging: %v", debugging)
+	log.Info().
+		Bool("debugging", debugging).
+		Msg("debugging toggled")
 	forceUpdate = true
 }
 
@@ -119,7 +128,9 @@ func shortcutMoveRoiRect(name key.Name, mod key.Modifiers) {
 	boundaryCheck(capturer.Bounds(), &newRect)
 	roiRect = newRect
 	showPosTill = time.Now().Add(time.Second * 3)
-	log.Debugf("roiRect: %v", roiRect)
+	log.Debug().
+		Any("roiRect", roiRect).
+		Msg("roiRect moved")
 }
 
 func shortcutSetWda(_ key.Name, mod key.Modifiers) {
@@ -129,7 +140,9 @@ func shortcutSetWda(_ key.Name, mod key.Modifiers) {
 
 	currWda, err := GetWindowDisplayAffinity(windowHandel)
 	if err != nil {
-		log.Errorf("failed to GetWindowDisplayAffinity: %v", err)
+		log.Error().
+			Err(err).
+			Msg("failed to GetWindowDisplayAffinity")
 		return
 	}
 
@@ -138,19 +151,24 @@ func shortcutSetWda(_ key.Name, mod key.Modifiers) {
 		var toWda uint32
 		if !mod.Contain(key.ModShift) {
 			toWda = WDA_EXCLUDEFROMCAPTURE
-			log.Info("wda set to WDA_EXCLUDEFROMCAPTURE")
+			log.Info().
+				Msg("wda set to WDA_EXCLUDEFROMCAPTURE")
 		} else {
 			toWda = WDA_MONITOR
-			log.Info("wda set to WDA_MONITOR")
+			log.Info().
+				Msg("wda set to WDA_MONITOR")
 		}
 		err = SetWindowDisplayAffinity(windowHandel, toWda)
 	case WDA_EXCLUDEFROMCAPTURE:
-		log.Info("wda set to WDA_NONE")
+		log.Info().
+			Msg("wda set to WDA_NONE")
 		err = SetWindowDisplayAffinity(windowHandel, WDA_NONE)
 	}
 
 	if err != nil {
-		log.Errorf("failed to SetWindowDisplayAffinity: %v", err)
+		log.Error().
+			Err(err).
+			Msg("failed to SetWindowDisplayAffinity")
 	}
 }
 
@@ -164,7 +182,8 @@ func shortcutStartInput(k key.Name, m key.Modifiers) {
 	switch k {
 	case "I", "i": // start
 		if !debugging {
-			log.Warnf("not in debugging")
+			log.Warn().
+				Msg("not in debugging")
 			return
 		}
 		inputting = true
@@ -183,7 +202,8 @@ func shortcutStartInput(k key.Name, m key.Modifiers) {
 		}
 		inputting = false
 		if inputBuf.Len() == 0 {
-			log.Warn("empty input")
+			log.Warn().
+				Msg("empty input")
 			return
 		}
 		modWeapon(inputMainOrAlt, inputBuf.String())

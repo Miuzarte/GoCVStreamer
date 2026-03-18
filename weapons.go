@@ -71,7 +71,7 @@ var OffsetTable = [...]int{
 	WEAPON_TYPE_MACHINE_PISTOL:    -2,
 	WEAPON_TYPE_SUBMACHINE_GUN:    -2,
 	WEAPON_TYPE_ASSAULT_RIFLE:     -2,
-	WEAPON_TYPE_LIGHT_MACHINE_GUN: -1,
+	WEAPON_TYPE_LIGHT_MACHINE_GUN: -2,
 	WEAPON_TYPE_SEMI_AUTO:         -2,
 }
 
@@ -181,7 +181,10 @@ func (w *Weapon) DecodeFrom(path string) error {
 		// overwriting
 		if name != w.Name {
 			// wried
-			log.Warnf("weapon %q name was changed to %q", w.Name, name)
+			log.Warn().
+				Str("oldName", w.Name).
+				Str("newName", name).
+				Msg("weapon name changed")
 		}
 	}
 
@@ -303,7 +306,9 @@ func (w *Weapon) Lua(orig bool) []byte {
 		w.luaBuf.WriteString(DEFAULT_CONTENT_FULL_AUTO)
 
 	default:
-		log.Panicf("unexpected Weapon.Mode: %d", w.Mode)
+		log.Panic().
+			Int("weaponMode", int(w.Mode)).
+			Msg("unexpected Weapon.Mode")
 	}
 
 	return w.luaBuf.Bytes()

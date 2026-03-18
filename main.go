@@ -25,9 +25,9 @@ import (
 
 	"github.com/Miuzarte/GoCVStreamer/capture"
 	cwg "github.com/Miuzarte/GoCVStreamer/contextWaitGroup"
+	"github.com/Miuzarte/GoCVStreamer/logger"
 	"github.com/fsnotify/fsnotify"
 
-	"github.com/Miuzarte/SimpleLog"
 	"github.com/kbinani/screenshot"
 	"github.com/kirides/go-d3d/outputduplication"
 	"github.com/shirou/gopsutil/v4/process"
@@ -53,12 +53,13 @@ const (
 var inIdle = false
 
 const (
+	// [TODO] use embed?
 	TEMPLATES_DIRECTORY     = "templates"
 	TEMPLATES_SUFFIX        = ".png"
 	TEMPLATES_PREFIX_IGNORE = "__"
 )
 
-var log = SimpleLog.New("[Streamer]", true, false).SetLevel(SimpleLog.DebugLevel)
+var log = logger.New("Streamer")
 
 var (
 	parentProcessId = os.Getppid()
@@ -70,7 +71,7 @@ var (
 )
 
 var (
-	capturer    *capture.Capturer
+	capturer    *capture.DxgiDesktopDuplicator
 	screenImage *image.RGBA
 	drawEnabled = true
 	roiRectSize = image.Point{8 * 11, 8 * 13}
@@ -116,7 +117,10 @@ func debuggingWaitForInput() (_ struct{}) {
 	if !debugging {
 		return
 	}
-	log.Debugf("pid: %d, ppid: %d", processId, parentProcessId)
+	log.Debug().
+		Int("pid", processId).
+		Int("ppid", parentProcessId).
+		Msg("process ids")
 	fmt.Print("waiting for any input...")
 	_, err := bufio.NewReader(os.Stdin).ReadBytes('\n')
 	if err == io.EOF {
@@ -130,7 +134,7 @@ func init() {
 	var err error
 
 	if windowTitle == "" {
-		log.Panic("failed to initialize window name")
+		log.Panic().Msg("failed to initialize window name")
 	}
 	window.Option(
 		app.Title(windowTitle),
@@ -142,7 +146,9 @@ func init() {
 	panicIf(err)
 
 	numDisplays := screenshot.NumActiveDisplays()
-	log.Infof("active displays: %d", numDisplays)
+	log.Info().
+		Int("activeDisplays", numDisplays).
+		Msg("active displays detected")
 	displayBoundaries := make([]image.Rectangle, numDisplays)
 	for i := range numDisplays {
 		displayBoundaries[i] = screenshot.GetDisplayBounds(i)
@@ -150,25 +156,29 @@ func init() {
 
 	displayIndex := 0
 	if numDisplays > 1 {
-		log.Info("multi displays detected")
+		log.Info().Msg("multi displays detected")
 		for i := range numDisplays {
 			size := displayBoundaries[i].Size()
-			fmt.Fprintf(log.Out, "[%d] %dx%d (X:%d, Y:%d)\n", i, size.X, size.Y, displayBoundaries[i].Min.X, displayBoundaries[i].Min.Y)
+			fmt.Fprintf(os.Stdout, "[%d] %dx%d (X:%d, Y:%d)\n", i, size.X, size.Y, displayBoundaries[i].Min.X, displayBoundaries[i].Min.Y)
 		}
 
 		reader := bufio.NewReader(os.Stdin)
 		for {
-			fmt.Fprintf(log.Out, "input index in range [0,%d]: ", numDisplays-1)
+			fmt.Fprintf(os.Stdout, "input index in range [0,%d]: ", numDisplays-1)
 			input, err := reader.ReadString('\n')
 			if err != nil && !errors.Is(err, io.EOF) {
-				log.Panicf("failed to read os.Stdin: %v", err)
+				log.Panic().Err(err).Msg("failed to read os.Stdin")
 			}
 
 			input = strings.TrimSpace(input)
 			if input != "" {
 				index, err := strconv.Atoi(input)
 				if err != nil || index < 0 || index >= numDisplays {
-					log.Warnf("invalid input %q", input)
+					log.Warn().
+						Str("input", input).
+						Int("min", 0).
+						Int("max", numDisplays-1).
+						Msg("invalid display index input")
 					continue
 				}
 				displayIndex = index
@@ -183,7 +193,9 @@ func init() {
 						displayIndex = i
 					}
 				}
-				log.Infof("auto selected display %d", displayIndex)
+				log.Info().
+					Int("displayIndex", displayIndex).
+					Msg("auto selected display")
 			}
 
 			break
@@ -191,18 +203,25 @@ func init() {
 	}
 
 	displayBounds := displayBoundaries[displayIndex]
-	log.Infof("using display [%d] (%dx%d)", displayIndex, displayBounds.Dx(), displayBounds.Dy())
+	log.Info().
+		Int("displayIndex", displayIndex).
+		Int("width", displayBounds.Dx()).
+		Int("height", displayBounds.Dy()).
+		Msg("using display")
 
 	capturer, err = capture.New(displayIndex)
 	panicIf(err)
 	if !capturer.Bounds().Eq(displayBounds) {
-		log.Warnf("capturer.Bounds() (%v) != displayBounds (%v)", capturer.Bounds(), displayBounds)
+		log.Warn().
+			Any("capturerBounds", capturer.Bounds()).
+			Any("displayBounds", displayBounds).
+			Msg("capturer bounds mismatch")
 	}
 	screenImage = image.NewRGBA(capturer.Bounds())
 
 	err = windows.SetPriorityClass(windows.CurrentProcess(), windows.HIGH_PRIORITY_CLASS)
 	if err != nil {
-		log.Warnf("failed to set process priority: %v", err)
+		log.Warn().Err(err).Msg("failed to set process priority")
 	}
 
 	loadTemplates()
@@ -220,7 +239,10 @@ func loadTemplates() {
 		panicIf(weapons.Close())
 	}
 	panicIf(weapons.ReadFrom(TEMPLATES_DIRECTORY, 1, TEMPLATES_SUFFIX, TEMPLATES_PREFIX_IGNORE))
-	log.Infof("%d template(s) loaded cost %s", len(weapons), time.Since(tStart))
+	log.Info().
+		Int("templates", len(weapons)).
+		Dur("cost", time.Since(tStart)).
+		Msg("templates loaded")
 }
 
 func main() {
@@ -231,15 +253,15 @@ func main() {
 		var err error
 		err = capturer.Close()
 		if err != nil {
-			log.Errorf("failed to close capturer: %v")
+			log.Error().Err(err).Msg("failed to close capturer")
 		}
 		err = weapons.Close()
 		if err != nil {
-			log.Errorf("failed to close weapons: %v")
+			log.Error().Err(err).Msg("failed to close weapons")
 		}
 		err = luaFile.Close()
 		if err != nil {
-			log.Errorf("failed to close luaFile: %v")
+			log.Error().Err(err).Msg("failed to close luaFile")
 		}
 	}()
 
@@ -324,11 +346,14 @@ func luaSwitchingLoop(ctx context.Context) {
 				luaFileContentIndex >= 0 && newIndex >= 0 {
 				os.Stderr.Write([]byte{'\a'})
 			}
-			log.Debugf(
-				"switching from [%d]%s(%05.2f%%) to [%d]%s(%05.2f%%)",
-				luaFileContentIndex, fromName, fromVal*100,
-				newIndex, toName, toVal*100,
-			)
+			log.Debug().
+				Int("fromIndex", luaFileContentIndex).
+				Int("toIndex", newIndex).
+				Str("fromName", fromName).
+				Str("toName", toName).
+				Float32("fromVal", fromVal).
+				Float32("toVal", toVal).
+				Msg("switching weapon")
 		}
 
 		// no debounce when debugging
@@ -343,7 +368,7 @@ func luaSwitchingLoop(ctx context.Context) {
 				// debounce skipping
 				timeToNone := luaLastSwitchToNone.Add(debounceInterval)
 				if time.Now().Before(timeToNone) {
-					log.Debug("switching skipped due to debounce")
+					log.Debug().Msg("switching skipped due to debounce")
 					return
 				}
 				// exit debounce
@@ -387,9 +412,9 @@ func windowLoop(ctx context.Context) {
 		switch e := window.Event().(type) {
 		case app.DestroyEvent:
 			if e.Err != nil {
-				log.Errorf("window error: %v", e.Err)
+				log.Error().Err(e.Err).Msg("window error")
 			} else {
-				log.Debug("window closed normally")
+				log.Debug().Msg("window closed normally")
 			}
 			return
 
@@ -399,7 +424,7 @@ func windowLoop(ctx context.Context) {
 
 			err := shortcuts.Match(gtx)
 			if err != nil {
-				log.Warnf("shortcuts match error: %v", err)
+				log.Warn().Err(err).Msg("shortcuts match error")
 			}
 
 			if screenImage != nil {
@@ -414,14 +439,17 @@ func windowLoop(ctx context.Context) {
 		case app.ConfigEvent:
 		// case app.wakeupEvent:
 		default:
-			log.Tracef("event[%T]: %v", e, e)
+			log.Trace().
+				Str("eventType", fmt.Sprintf("%T", e)).
+				Any("event", e).
+				Msg("window event")
 		}
 	}
 }
 
 func modWeapon(mainOrAlt bool, newSpeed string) {
 	if luaFileContentIndex == WEAPON_INDEX_NONE {
-		log.Warn("weapon unselected")
+		log.Warn().Msg("weapon unselected")
 		return
 	}
 
@@ -464,9 +492,15 @@ func modWeapon(mainOrAlt bool, newSpeed string) {
 	newPath := filepath.Join(dir, newName)
 	err := os.Rename(orig.Path, newPath)
 	if err != nil {
-		log.Errorf("[main] failed to rename file from %q to %q", orig.Path, newPath)
+		log.Error().Err(err).
+			Str("from", orig.Path).
+			Str("to", newPath).
+			Msg("failed to rename weapon file")
 	} else {
-		log.Infof("[main] renamed file from %q to %q", orig.Path, newPath)
+		log.Info().
+			Str("from", orig.Path).
+			Str("to", newPath).
+			Msg("renamed weapon file")
 	}
 
 	forceUpdate = true
@@ -480,7 +514,7 @@ func tmplWatchLoop(ctx context.Context) {
 	}
 	if unsafe.Sizeof(myFsEvent{}) != unsafe.Sizeof(fsnotify.Event{}) ||
 		reflect.TypeOf(myFsEvent{}).NumField() != reflect.TypeOf(fsnotify.Event{}).NumField() {
-		log.Panic("[FIXME] definition of fsnotify.Event has been changed")
+		log.Panic().Msg("[FIXME] definition of fsnotify.Event has been changed")
 	}
 
 	watcher, err := fsnotify.NewWatcher()
@@ -563,7 +597,9 @@ func tmplWatchLoop(ctx context.Context) {
 				return
 			}
 
-			log.Debugf("fs event: %s", event)
+			log.Debug().
+				Any("event", event).
+				Msg("fs event")
 
 			/*
 				[14:13:57.771]CREATE        "templates\\config.ini"
@@ -591,30 +627,42 @@ func tmplWatchLoop(ctx context.Context) {
 					err = muModWeapon(renameFrom, event.Name)
 				}
 				if err != nil {
-					log.Warn(err)
+					log.Warn().Err(err).Msg("failed to handle create/rename event")
 					continue
 				}
 
 				if renameFrom == "" {
-					log.Infof("weapon %q added successfully", event.Name)
+					log.Info().
+						Str("path", event.Name).
+						Msg("weapon added successfully")
 				} else {
-					log.Infof("weapon %q modified successfully", event.Name)
+					log.Info().
+						Str("path", event.Name).
+						Str("renameFrom", renameFrom).
+						Msg("weapon modified successfully")
 				}
 
 			case fsnotify.Remove:
 				deleted, err := muDelWeapon(event)
 				if err != nil {
-					log.Warn(err)
+					log.Warn().Err(err).Msg("failed to handle remove event")
 					continue
 				}
 
 				switch deleted {
 				case 1:
-					log.Infof("weapon %q deleted successfully", event.Name)
+					log.Info().
+						Str("path", event.Name).
+						Msg("weapon deleted successfully")
 				case 0:
-					log.Warnf("weapon %q failed to delete", event.Name)
+					log.Warn().
+						Str("path", event.Name).
+						Msg("weapon failed to delete")
 				default:
-					log.Warnf("weapon %q triggered multiple weapons deletion: %d", event.Name, deleted)
+					log.Warn().
+						Str("path", event.Name).
+						Int("deleted", deleted).
+						Msg("weapon triggered multiple deletions")
 				}
 
 			}
@@ -623,7 +671,7 @@ func tmplWatchLoop(ctx context.Context) {
 			if !ok {
 				return
 			}
-			log.Errorf("fsnotify error: %v", err)
+			log.Error().Err(err).Msg("fsnotify error")
 
 		}
 	}
@@ -690,7 +738,10 @@ func tmplMatchLoop(ctx context.Context) {
 			panicIf(err)
 
 			if !roiRect.In(capturer.Bounds()) {
-				log.Errorf("roiRect %v is not fully contained in screen bounds %v", roiRect, capturer.Bounds())
+				log.Error().
+					Any("roiRect", roiRect).
+					Any("screenBounds", capturer.Bounds()).
+					Msg("roiRect is not fully contained in screen bounds")
 				continue
 			}
 			// template match
@@ -745,7 +796,7 @@ func imageToMat(img image.Image, dst *gocv.Mat) (err error) {
 
 	default:
 		imageToMatWarnOnce.Do(func() {
-			log.Warn("unexpected image color model, conversion performance may be affected")
+			log.Warn().Msg("unexpected image color model, conversion performance may be affected")
 		})
 		data := make([]byte, 0, x*y*3)
 		for j := bounds.Min.Y; j < bounds.Max.Y; j++ {
