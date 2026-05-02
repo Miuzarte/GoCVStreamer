@@ -1,12 +1,12 @@
-.vscode/
+# .vscode/
 
-opencv*
+opencv*/
 
 templates*/
 
 # build.ps1
 config.ini
 
-*.code-workspace
+# *.code-workspace
 *.exe
 *.lua

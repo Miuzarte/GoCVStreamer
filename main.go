@@ -134,7 +134,8 @@ func init() {
 	var err error
 
 	if windowTitle == "" {
-		log.Panic().Msg("failed to initialize window name")
+		log.Panic().
+			Msg("failed to initialize window name")
 	}
 	window.Option(
 		app.Title(windowTitle),

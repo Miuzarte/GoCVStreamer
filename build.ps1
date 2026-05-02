@@ -18,8 +18,8 @@ if (-not $ProjectDir) {
 }
 
 # 设置 OpenCV 路径（Windows 格式）
-$OpenCVDir = Join-Path $ProjectDir "opencv_build/install"
-# $OpenCVDir = Join-Path $ProjectDir "opencv_build_msvc_cuda/install"
+$OpenCVDir = "B:/Lib/opencv_build/install"
+# $OpenCVDir = "B:/Lib/opencv_build_msvc_cuda/install"
 $OpenCVInclude = Join-Path $OpenCVDir "include"
 $OpenCVBin = Join-Path $OpenCVDir "x64\mingw\bin"
 # $OpenCVBin = Join-Path $OpenCVDir "x64\vc18\bin"

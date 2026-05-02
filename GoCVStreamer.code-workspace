@@ -1,0 +1,17 @@
+{
+	"folders": [
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		"terminal.integrated.env.windows": {
+			"PATH": "B:/Lib/opencv_build/install/x64/mingw/bin;${env:PATH}",
+			// "PATH": "B:/Lib/opencv_build_msvc_cuda/install/x64/vc18/bin;${env:PATH}",
+		},
+		"C_Cpp.default.includePath": [
+			"B:/Lib/opencv_build/install/include"
+			// "B:/Lib/opencv_build_msvc_cuda/install/include"
+		],
+	}
+}
