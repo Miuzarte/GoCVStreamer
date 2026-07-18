@@ -22,6 +22,7 @@ import (
 	"gioui.org/op"
 
 	cwg "github.com/Miuzarte/GoCVStreamer/contextWaitGroup"
+	"github.com/Miuzarte/GoCVStreamer/fps"
 	"github.com/Miuzarte/GoCVStreamer/logger"
 	w "github.com/Miuzarte/GoCVStreamer/weapon"
 	ws "github.com/Miuzarte/GoCVStreamer/weapons"
@@ -40,7 +41,11 @@ const (
 
 var debugging = DEBUGGING
 
-var nogui = flag.Bool("nogui", false, "run without GUI window")
+var (
+	nogui    = flag.Bool("nogui", false, "run without GUI window")
+	httpPort = flag.String("port", ":8080", "HTTP metrics server port")
+	nohttp   = flag.Bool("nohttp", false, "disable HTTP metrics server")
+)
 
 var log = logger.New("Streamer")
 
@@ -97,12 +102,17 @@ var (
 	lastGCStats         debug.GCStats
 	captureCost         time.Duration
 	weaponsMatchingCost time.Duration
+	fpsCount            float64
+	fpsFrametime        time.Duration
 	highLatencyCount    int
 	lastHighLatencyTime time.Time
 )
 
+var fpsCounter = fps.NewCounter(SAMPLE_INTERVAL)
+
 var (
 	inIdle              = false
+	narrowing           = false
 	luaFile             *os.File
 	luaFileContentIndex = WEAPON_INDEX_NONE
 	luaFileContent      []byte
@@ -217,6 +227,12 @@ func main() {
 	cwg := cwg.New(context.Background())
 	cwg.WithSignal(syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
 	defer cwg.Cancel()
+
+	if !*nohttp {
+		cwg.Go(func(ctx context.Context) {
+			startHttpServer(ctx, *httpPort)
+		})
+	}
 
 	cwg.Go(func(ctx context.Context) {
 		cpuMeasureLoop(ctx)
@@ -384,7 +400,7 @@ func windowLoop(ctx context.Context) {
 				layoutDisplay(gtx, screenImage)
 			}
 			if drawEnabled {
-				layoutGocvInfo(gtx)
+				layoutMetrics(gtx)
 			}
 
 			e.Frame(gtx.Ops)
@@ -586,7 +602,7 @@ func tmplMatchLoop(ctx context.Context) {
 	defer close(ticker)
 
 	lastFoundTime := time.Now()
-	narrowing := false
+	narrowing = false
 	lastSlot := w.Slot(w.SLOT_UNDEFINED)
 
 	for {
@@ -650,6 +666,8 @@ func tmplMatchLoop(ctx context.Context) {
 			weaponIndex, weaponsMatched, weaponFound = doMatchWeapon(captureRoi, slotFilter)
 			weaponsMatchingCost = time.Since(tStart)
 			captureRoi.Close()
+
+			fpsCount, fpsFrametime = fpsCounter.Count()
 
 			// output
 			if weaponFound {
