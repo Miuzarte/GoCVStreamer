@@ -19,6 +19,7 @@ import (
 
 	"github.com/Miuzarte/GoCVStreamer/fps"
 	"github.com/Miuzarte/GoCVStreamer/template"
+	w "github.com/Miuzarte/GoCVStreamer/weapon"
 	"github.com/Miuzarte/GoCVStreamer/widgets"
 )
 
@@ -223,7 +224,7 @@ func layoutGocvInfo(gtx layout.Context) {
 	colorPos := colorGreen
 	colorNeg := colorCyan
 	min, max := weapons.MinMaxIndex()
-	var weaponPos *Weapon
+	var weaponPos *w.Weapon
 	weaponNeg := weapons[min]
 	if weaponFound {
 		weaponPos = weapons[weaponIndex]

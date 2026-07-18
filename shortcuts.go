@@ -6,10 +6,12 @@ import (
 	"image"
 	"math/bits"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"gioui.org/io/key"
+	w "github.com/Miuzarte/GoCVStreamer/weapon"
 	"golang.org/x/sys/windows"
 )
 
@@ -41,8 +43,8 @@ func shortcutListWeapons(key.Name, key.Modifiers) {
 		fmt.Fprintf(os.Stdout,
 			"[%0*d] {%s_%02d.%d_%02d.%d} %-*s %.2f%%\n",
 			indexLength, i,
-			// w.Type.string(true),
-			w.Class.string(true),
+			// w.Type.ToString(true),
+			w.Class.ToString(true),
 			speedMain, speedMainF, speedAlt, speedAltF,
 			weaponNameLongest, w.Name,
 			w.Template.MaxVal*100,
@@ -216,4 +218,64 @@ func shortcutStartInput(k key.Name, m key.Modifiers) {
 		}
 		return
 	}
+}
+
+func modWeapon(mainOrAlt bool, newSpeed string) {
+	if luaFileContentIndex == WEAPON_INDEX_NONE {
+		log.Warn().Msg("weapon unselected")
+		return
+	}
+
+	switch newSpeed {
+	case "-":
+		mainOrAlt = true // only for alt speed
+		newSpeed = w.SPEED_SIGN_AUTO
+	case "--":
+		mainOrAlt = true
+		newSpeed = w.SPEED_SIGN_COPY
+	}
+
+	orig := weapons[luaFileContentIndex]
+	dir := filepath.Dir(orig.Path)
+	origName := filepath.Base(orig.Path)
+	ext := filepath.Ext(origName)
+
+	var speedMain, speedAlt string
+	if !mainOrAlt {
+		speedMain = newSpeed
+		if orig.SpeedAltFrac != 0 {
+			speedAlt = fmt.Sprintf("%d.%d", orig.SpeedAltInt, orig.SpeedAltFrac)
+		} else {
+			speedAlt = fmt.Sprintf("%d", orig.SpeedAltInt)
+		}
+	} else {
+		if orig.SpeedMainFrac != 0 {
+			speedMain = fmt.Sprintf("%d.%d", orig.SpeedMainInt, orig.SpeedMainFrac)
+		} else {
+			speedMain = fmt.Sprintf("%d", orig.SpeedMainInt)
+		}
+		speedAlt = newSpeed
+	}
+
+	newName := fmt.Sprintf("{%s_%s_%s} %s%s",
+		// orig.Type.ToString(true),
+		orig.Class.ToString(true),
+		speedMain, speedAlt,
+		orig.Name, ext,
+	)
+	newPath := filepath.Join(dir, newName)
+	err := os.Rename(orig.Path, newPath)
+	if err != nil {
+		log.Error().Err(err).
+			Str("from", orig.Path).
+			Str("to", newPath).
+			Msg("failed to rename weapon file")
+	} else {
+		log.Info().
+			Str("from", orig.Path).
+			Str("to", newPath).
+			Msg("renamed weapon file")
+	}
+
+	forceUpdate = true
 }

@@ -3,17 +3,14 @@ package main
 import (
 	"bufio"
 	"context"
-	"errors"
 	"fmt"
 	"image"
-	"image/color"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"runtime/debug"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -23,12 +20,12 @@ import (
 	"gioui.org/app"
 	"gioui.org/op"
 
-	"github.com/Miuzarte/GoCVStreamer/capture"
 	cwg "github.com/Miuzarte/GoCVStreamer/contextWaitGroup"
 	"github.com/Miuzarte/GoCVStreamer/logger"
+	w "github.com/Miuzarte/GoCVStreamer/weapon"
+	ws "github.com/Miuzarte/GoCVStreamer/weapons"
 	"github.com/fsnotify/fsnotify"
 
-	"github.com/kbinani/screenshot"
 	"github.com/kirides/go-d3d/outputduplication"
 	"github.com/shirou/gopsutil/v4/process"
 	"gocv.io/x/gocv"
@@ -42,15 +39,7 @@ const (
 
 var debugging = DEBUGGING
 
-const (
-	SAMPLE_RATE                  = 5 // Hz
-	SAMPLE_INTERVAL              = time.Second / SAMPLE_RATE
-	SAMPLE_RATE_IDLE             = 2 // Hz
-	SAMPLE_INTERVAL_IDLE         = time.Second / SAMPLE_RATE_IDLE
-	SAMPLE_RATE_TO_IDLE_DURATION = time.Second * 5
-)
-
-var inIdle = false
+var log = logger.New("Streamer")
 
 const (
 	TEMPLATES_DIRECTORY     = "templates"
@@ -58,7 +47,18 @@ const (
 	TEMPLATES_PREFIX_IGNORE = "__"
 )
 
-var log = logger.New("Streamer")
+const (
+	CREATE_MASK                   = false
+	MATCHING_MODE gocv.IMReadFlag = gocv.IMReadGrayScale
+)
+
+const (
+	SAMPLE_RATE                  = 5 // Hz
+	SAMPLE_INTERVAL              = time.Second / SAMPLE_RATE
+	SAMPLE_RATE_IDLE             = 2 // Hz
+	SAMPLE_INTERVAL_IDLE         = time.Second / SAMPLE_RATE_IDLE
+	SAMPLE_RATE_TO_IDLE_DURATION = time.Second * 5
+)
 
 var (
 	parentProcessId = os.Getppid()
@@ -70,8 +70,6 @@ var (
 )
 
 var (
-	capturer    *capture.DxgiDesktopDuplicator
-	screenImage *image.RGBA
 	drawEnabled = true
 	roiRectSize = image.Point{8 * 11, 8 * 13}
 	roiRectPos  = image.Point{2000, 1200}
@@ -82,15 +80,13 @@ var (
 
 var (
 	weaponsMu      sync.RWMutex
-	weapons        Weapons
+	weapons        ws.Weapons
 	weaponIndex    int
 	weaponsMatched int
 	weaponFound    bool
 )
 
 const WEAPON_INDEX_NONE = -1
-
-const MATCHING_MODE gocv.IMReadFlag = gocv.IMReadGrayScale
 
 const MATCH_THRESHOLD = 0.9
 
@@ -103,6 +99,7 @@ var (
 )
 
 var (
+	inIdle              = false
 	luaFile             *os.File
 	luaFileContentIndex = WEAPON_INDEX_NONE
 	luaFileContent      []byte
@@ -143,92 +140,30 @@ func init() {
 		app.Size(1280, 720),
 	)
 
-	processSelf, err = process.NewProcess(int32(processId))
-	panicIf(err)
-
-	numDisplays := screenshot.NumActiveDisplays()
-	log.Info().
-		Int("activeDisplays", numDisplays).
-		Msg("active displays detected")
-	displayBoundaries := make([]image.Rectangle, numDisplays)
-	for i := range numDisplays {
-		displayBoundaries[i] = screenshot.GetDisplayBounds(i)
-	}
-
-	displayIndex := 0
-	if numDisplays > 1 {
-		log.Info().Msg("multi displays detected")
-		for i := range numDisplays {
-			size := displayBoundaries[i].Size()
-			fmt.Fprintf(os.Stdout, "[%d] %dx%d (X:%d, Y:%d)\n", i, size.X, size.Y, displayBoundaries[i].Min.X, displayBoundaries[i].Min.Y)
-		}
-
-		reader := bufio.NewReader(os.Stdin)
-		for {
-			fmt.Fprintf(os.Stdout, "input index in range [0,%d]: ", numDisplays-1)
-			input, err := reader.ReadString('\n')
-			if err != nil && !errors.Is(err, io.EOF) {
-				log.Panic().Err(err).Msg("failed to read os.Stdin")
-			}
-
-			input = strings.TrimSpace(input)
-			if input != "" {
-				index, err := strconv.Atoi(input)
-				if err != nil || index < 0 || index >= numDisplays {
-					log.Warn().
-						Str("input", input).
-						Int("min", 0).
-						Int("max", numDisplays-1).
-						Msg("invalid display index input")
-					continue
-				}
-				displayIndex = index
-			} else {
-				// use the one with max resolution
-				maxRes := 0
-				for i := range numDisplays {
-					size := displayBoundaries[i].Size()
-					res := size.X * size.Y
-					if res > maxRes {
-						maxRes = res
-						displayIndex = i
-					}
-				}
-				log.Info().
-					Int("displayIndex", displayIndex).
-					Msg("auto selected display")
-			}
-
-			break
-		}
-	}
-
-	displayBounds := displayBoundaries[displayIndex]
-	log.Info().
-		Int("displayIndex", displayIndex).
-		Int("width", displayBounds.Dx()).
-		Int("height", displayBounds.Dy()).
-		Msg("using display")
-
-	capturer, err = capture.New(displayIndex)
-	panicIf(err)
-	if !capturer.Bounds().Eq(displayBounds) {
-		log.Warn().
-			Any("capturerBounds", capturer.Bounds()).
-			Any("displayBounds", displayBounds).
-			Msg("capturer bounds mismatch")
-	}
-	screenImage = image.NewRGBA(capturer.Bounds())
-
 	err = windows.SetPriorityClass(windows.CurrentProcess(), windows.HIGH_PRIORITY_CLASS)
 	if err != nil {
-		log.Warn().Err(err).Msg("failed to set process priority")
+		log.Warn().
+			Err(err).
+			Msg("failed to set process priority")
 	}
+
+	processSelf, err = process.NewProcess(int32(processId))
+	if err != nil {
+		log.Panic().
+			Err(err).
+			Msg("failed to get process")
+	}
+
+	selectDisplay()
 
 	loadTemplates()
 
 	luaFile, err = os.OpenFile("speed.lua", os.O_WRONLY|os.O_CREATE, 0o664)
-	panicIf(err)
+	if err != nil {
+		log.Panic().
+			Err(err).
+			Msg("failed to open file")
+	}
 }
 
 func loadTemplates() {
@@ -239,7 +174,7 @@ func loadTemplates() {
 	if len(weapons) != 0 {
 		panicIf(weapons.Close())
 	}
-	panicIf(weapons.ReadFrom(TEMPLATES_DIRECTORY, 1, TEMPLATES_SUFFIX, TEMPLATES_PREFIX_IGNORE))
+	panicIf(weapons.ReadFrom(TEMPLATES_DIRECTORY, 1, TEMPLATES_SUFFIX, TEMPLATES_PREFIX_IGNORE, CREATE_MASK, MATCHING_MODE))
 	log.Info().
 		Int("templates", len(weapons)).
 		Dur("cost", time.Since(tStart)).
@@ -320,7 +255,7 @@ func luaSwitchingLoop(ctx context.Context) {
 		weaponsMu.RLock()
 		defer weaponsMu.RUnlock()
 
-		var from *Weapon
+		var from *w.Weapon
 		fromName := "N/A"
 		var fromVal float32
 		if luaFileContentIndex >= 0 {
@@ -329,7 +264,7 @@ func luaSwitchingLoop(ctx context.Context) {
 			fromVal = from.Template.MaxVal
 		}
 
-		var to *Weapon
+		var to *w.Weapon
 		toName := "N/A"
 		var toVal float32
 		if newIndex >= 0 {
@@ -452,66 +387,6 @@ func windowLoop(ctx context.Context) {
 	}
 }
 
-func modWeapon(mainOrAlt bool, newSpeed string) {
-	if luaFileContentIndex == WEAPON_INDEX_NONE {
-		log.Warn().Msg("weapon unselected")
-		return
-	}
-
-	switch newSpeed {
-	case "-":
-		mainOrAlt = true // only for alt speed
-		newSpeed = SPEED_SIGN_AUTO
-	case "--":
-		mainOrAlt = true
-		newSpeed = SPEED_SIGN_COPY
-	}
-
-	orig := weapons[luaFileContentIndex]
-	dir := filepath.Dir(orig.Path)
-	origName := filepath.Base(orig.Path)
-	ext := filepath.Ext(origName)
-
-	var speedMain, speedAlt string
-	if !mainOrAlt {
-		speedMain = newSpeed
-		if orig.SpeedAltFrac != 0 {
-			speedAlt = fmt.Sprintf("%d.%d", orig.SpeedAltInt, orig.SpeedAltFrac)
-		} else {
-			speedAlt = fmt.Sprintf("%d", orig.SpeedAltInt)
-		}
-	} else {
-		if orig.SpeedMainFrac != 0 {
-			speedMain = fmt.Sprintf("%d.%d", orig.SpeedMainInt, orig.SpeedMainFrac)
-		} else {
-			speedMain = fmt.Sprintf("%d", orig.SpeedMainInt)
-		}
-		speedAlt = newSpeed
-	}
-
-	newName := fmt.Sprintf("{%s_%s_%s} %s%s",
-		// orig.Type.string(true),
-		orig.Class.string(true),
-		speedMain, speedAlt,
-		orig.Name, ext,
-	)
-	newPath := filepath.Join(dir, newName)
-	err := os.Rename(orig.Path, newPath)
-	if err != nil {
-		log.Error().Err(err).
-			Str("from", orig.Path).
-			Str("to", newPath).
-			Msg("failed to rename weapon file")
-	} else {
-		log.Info().
-			Str("from", orig.Path).
-			Str("to", newPath).
-			Msg("renamed weapon file")
-	}
-
-	forceUpdate = true
-}
-
 func tmplWatchLoop(ctx context.Context) {
 	type myFsEvent struct {
 		Name        string
@@ -545,7 +420,7 @@ func tmplWatchLoop(ctx context.Context) {
 		defer weaponsMu.Unlock()
 
 		time.Sleep(time.Millisecond * 100) // simply wait for the end of writing
-		err := weapons.Append(name)
+		err := weapons.Append(name, CREATE_MASK, MATCHING_MODE)
 		if err != nil {
 			return fmt.Errorf("failed to add new weapon %q: %w", name, err)
 		}
@@ -561,7 +436,7 @@ func tmplWatchLoop(ctx context.Context) {
 		}
 
 		origI := -1
-		origName, _, err := parseFileName(from)
+		origName, _, err := w.ParseFileName(from)
 		if err == nil {
 			origI = weapons.IndexByName(origName)
 			// } else {
@@ -570,7 +445,7 @@ func tmplWatchLoop(ctx context.Context) {
 
 		if origI < 0 {
 			// load the new one
-			err := weapons.Append(to)
+			err := weapons.Append(to, CREATE_MASK, MATCHING_MODE)
 			if err != nil {
 				return fmt.Errorf("failed to add new weapon %q: %w", to, err)
 			}
@@ -587,7 +462,7 @@ func tmplWatchLoop(ctx context.Context) {
 				return nil
 			}
 
-			return weapons[origI].DecodeFrom(to)
+			return weapons[origI].DecodeFrom(to, CREATE_MASK, MATCHING_MODE)
 		}
 
 		return nil
@@ -699,7 +574,7 @@ func tmplMatchLoop(ctx context.Context) {
 
 	lastFoundTime := time.Now()
 	narrowing := false
-	lastSlot := WeaponSlot(WEAPON_SLOT_UNDEFINED)
+	lastSlot := w.Slot(w.SLOT_UNDEFINED)
 
 	for {
 		select {
@@ -755,9 +630,9 @@ func tmplMatchLoop(ctx context.Context) {
 			// template match
 			captureRoi := capture.Region(roiRect)
 			tStart = time.Now()
-			slotFilter := WeaponSlot(WEAPON_SLOT_UNDEFINED)
+			slotFilter := w.Slot(w.SLOT_UNDEFINED)
 			if narrowing {
-				slotFilter = oppositeSlot(lastSlot)
+				slotFilter = lastSlot.Opposite()
 			}
 			weaponIndex, weaponsMatched, weaponFound = doMatchWeapon(captureRoi, slotFilter)
 			weaponsMatchingCost = time.Since(tStart)
@@ -769,7 +644,7 @@ func tmplMatchLoop(ctx context.Context) {
 				lastFoundTime = time.Now()
 				inIdle = false
 				lastSlot = weapons[weaponIndex].Class.Detail().Slot
-				if lastSlot != WEAPON_SLOT_UNDEFINED && !lastSlot.Is(WEAPON_SLOT_MIX) {
+				if lastSlot != w.SLOT_UNDEFINED && !lastSlot.Is(w.SLOT_MIX) {
 					narrowing = true
 				} else {
 					narrowing = false
@@ -782,7 +657,7 @@ func tmplMatchLoop(ctx context.Context) {
 				if time.Since(lastFoundTime) > SAMPLE_RATE_TO_IDLE_DURATION && !debugging {
 					inIdle = true
 					narrowing = false
-					lastSlot = WEAPON_SLOT_UNDEFINED
+					lastSlot = w.SLOT_UNDEFINED
 				}
 				weaponIndexSignal <- WEAPON_INDEX_NONE
 			}
@@ -792,98 +667,9 @@ func tmplMatchLoop(ctx context.Context) {
 	}
 }
 
-var imageToMatWarnOnce sync.Once
-
-func imageToMat(img image.Image, dst *gocv.Mat) (err error) {
-	var src gocv.Mat
-
-	bounds := img.Bounds()
-	x := bounds.Dx()
-	y := bounds.Dy()
-
-	switch img.ColorModel() {
-	case color.RGBAModel:
-		m, res := img.(*image.RGBA)
-		if true != res {
-			return fmt.Errorf("image color format error")
-		}
-		// speed up the conversion process of RGBA format
-		src, err = gocv.NewMatFromBytes(y, x, gocv.MatTypeCV8UC4, m.Pix)
-		if err != nil {
-			return err
-		}
-		defer src.Close()
-
-	default:
-		imageToMatWarnOnce.Do(func() {
-			log.Warn().Msg("unexpected image color model, conversion performance may be affected")
-		})
-		if MATCHING_MODE == gocv.IMReadGrayScale {
-			data := make([]byte, 0, x*y)
-			for j := bounds.Min.Y; j < bounds.Max.Y; j++ {
-				for i := bounds.Min.X; i < bounds.Max.X; i++ {
-					r, g, b, _ := img.At(i, j).RGBA()
-					gray := byte((19595*uint32(r) + 38470*uint32(g) + 7471*uint32(b)) >> 16)
-					data = append(data, gray)
-				}
-			}
-			src, err = gocv.NewMatFromBytes(y, x, gocv.MatTypeCV8UC1, data)
-			if err != nil {
-				return err
-			}
-			defer src.Close()
-		} else {
-			data := make([]byte, 0, x*y*3)
-			for j := bounds.Min.Y; j < bounds.Max.Y; j++ {
-				for i := bounds.Min.X; i < bounds.Max.X; i++ {
-					r, g, b, _ := img.At(i, j).RGBA()
-					data = append(data, byte(b>>8), byte(g>>8), byte(r>>8))
-				}
-			}
-			src, err = gocv.NewMatFromBytes(y, x, gocv.MatTypeCV8UC3, data)
-			if err != nil {
-				return err
-			}
-			defer src.Close()
-		}
-	}
-
-	if MATCHING_MODE == gocv.IMReadGrayScale {
-		return gocv.CvtColor(src, dst, gocv.ColorRGBAToGray)
-	}
-	return gocv.CvtColor(src, dst, gocv.ColorRGBAToBGR)
-}
-
-func doScreenshot(dstImage *image.RGBA, dstMat *gocv.Mat) error {
-	err := capturer.GetImage(dstImage)
-	if err != nil {
-		return err
-	}
-	err = imageToMat(dstImage, dstMat)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func oppositeSlot(s WeaponSlot) WeaponSlot {
-	hasPrimary := s.Has(WEAPON_SLOT_PRIMARY)
-	hasSecondary := s.Has(WEAPON_SLOT_SECONDARY)
-	if hasPrimary && hasSecondary {
-		return WEAPON_SLOT_UNDEFINED
-	}
-	if hasPrimary {
-		return WEAPON_SLOT_SECONDARY
-	}
-	if hasSecondary {
-		return WEAPON_SLOT_PRIMARY
-	}
-	return WEAPON_SLOT_UNDEFINED
-}
-
 var lastSuccessfulTempl int
 
-func doMatchWeapon(image gocv.Mat, slotFilter WeaponSlot) (templateIndex, templateMatched int, found bool) {
+func doMatchWeapon(image gocv.Mat, slotFilter w.Slot) (templateIndex, templateMatched int, found bool) {
 	weaponsMu.RLock()
 	defer weaponsMu.RUnlock()
 
@@ -896,7 +682,7 @@ func doMatchWeapon(image gocv.Mat, slotFilter WeaponSlot) (templateIndex, templa
 
 		tmpl := weapons[i]
 
-		if slotFilter != WEAPON_SLOT_UNDEFINED && j != 0 && !tmpl.Class.Detail().Slot.Has(slotFilter) {
+		if slotFilter != w.SLOT_UNDEFINED && j != 0 && !tmpl.Class.Detail().Slot.Has(slotFilter) {
 			continue
 		}
 
