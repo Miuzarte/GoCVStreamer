@@ -338,6 +338,10 @@ func luaSwitchingLoop(ctx context.Context) {
 			toVal = to.Template.MaxVal
 		}
 
+		if newIndex >= 0 {
+			luaToNoneDebounce = false
+		}
+
 		if forceUpdate {
 			forceUpdate = false
 		} else if newIndex == luaFileContentIndex {
@@ -694,6 +698,8 @@ func tmplMatchLoop(ctx context.Context) {
 	defer close(ticker)
 
 	lastFoundTime := time.Now()
+	narrowing := false
+	lastSlot := WeaponSlot(WEAPON_SLOT_UNDEFINED)
 
 	for {
 		select {
@@ -749,7 +755,11 @@ func tmplMatchLoop(ctx context.Context) {
 			// template match
 			captureRoi := capture.Region(roiRect)
 			tStart = time.Now()
-			weaponIndex, weaponsMatched, weaponFound = doMatchWeapon(captureRoi)
+			slotFilter := WeaponSlot(WEAPON_SLOT_UNDEFINED)
+			if narrowing {
+				slotFilter = oppositeSlot(lastSlot)
+			}
+			weaponIndex, weaponsMatched, weaponFound = doMatchWeapon(captureRoi, slotFilter)
 			weaponsMatchingCost = time.Since(tStart)
 			captureRoi.Close()
 
@@ -758,6 +768,12 @@ func tmplMatchLoop(ctx context.Context) {
 				// exit idle
 				lastFoundTime = time.Now()
 				inIdle = false
+				lastSlot = weapons[weaponIndex].Class.Detail().Slot
+				if lastSlot != WEAPON_SLOT_UNDEFINED && !lastSlot.Is(WEAPON_SLOT_MIX) {
+					narrowing = true
+				} else {
+					narrowing = false
+				}
 				weaponIndexSignal <- weaponIndex
 			} else {
 				// failed for a period of time,
@@ -765,6 +781,8 @@ func tmplMatchLoop(ctx context.Context) {
 				// no idle when debugging
 				if time.Since(lastFoundTime) > SAMPLE_RATE_TO_IDLE_DURATION && !debugging {
 					inIdle = true
+					narrowing = false
+					lastSlot = WEAPON_SLOT_UNDEFINED
 				}
 				weaponIndexSignal <- WEAPON_INDEX_NONE
 			}
@@ -848,9 +866,24 @@ func doScreenshot(dstImage *image.RGBA, dstMat *gocv.Mat) error {
 	return nil
 }
 
+func oppositeSlot(s WeaponSlot) WeaponSlot {
+	hasPrimary := s.Has(WEAPON_SLOT_PRIMARY)
+	hasSecondary := s.Has(WEAPON_SLOT_SECONDARY)
+	if hasPrimary && hasSecondary {
+		return WEAPON_SLOT_UNDEFINED
+	}
+	if hasPrimary {
+		return WEAPON_SLOT_SECONDARY
+	}
+	if hasSecondary {
+		return WEAPON_SLOT_PRIMARY
+	}
+	return WEAPON_SLOT_UNDEFINED
+}
+
 var lastSuccessfulTempl int
 
-func doMatchWeapon(image gocv.Mat) (templateIndex, templateMatched int, found bool) {
+func doMatchWeapon(image gocv.Mat, slotFilter WeaponSlot) (templateIndex, templateMatched int, found bool) {
 	weaponsMu.RLock()
 	defer weaponsMu.RUnlock()
 
@@ -862,6 +895,11 @@ func doMatchWeapon(image gocv.Mat) (templateIndex, templateMatched int, found bo
 		templateIndex = i
 
 		tmpl := weapons[i]
+
+		if slotFilter != WEAPON_SLOT_UNDEFINED && j != 0 && !tmpl.Class.Detail().Slot.Has(slotFilter) {
+			continue
+		}
+
 		panicIf(tmpl.Template.Match(image, method))
 
 		templateMatched++
