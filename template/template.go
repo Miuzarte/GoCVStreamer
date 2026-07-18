@@ -23,13 +23,13 @@ type Template struct {
 	MinLoc, MaxLoc image.Point
 }
 
-func (t *Template) IMReadFrom(path string, createMask bool) error {
+func (t *Template) IMReadFrom(path string, createMask bool, flag gocv.IMReadFlag) error {
 	t.Close()
 	t.mask = gocv.NewMat()
 	t.result = gocv.NewMat()
 
 	if !createMask {
-		t.Mat = gocv.IMRead(path, gocv.IMReadColor)
+		t.Mat = gocv.IMRead(path, flag)
 	} else {
 		img := gocv.IMRead(path, gocv.IMReadUnchanged)
 		t.Mat = gocv.NewMat()

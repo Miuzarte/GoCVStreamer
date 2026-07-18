@@ -91,6 +91,8 @@ var (
 
 const WEAPON_INDEX_NONE = -1
 
+const MATCHING_MODE gocv.IMReadFlag = gocv.IMReadGrayScale
+
 // [TODO]? dynamic threshold
 const MATCH_THRESHOLD = 0.9
 
@@ -799,20 +801,39 @@ func imageToMat(img image.Image, dst *gocv.Mat) (err error) {
 		imageToMatWarnOnce.Do(func() {
 			log.Warn().Msg("unexpected image color model, conversion performance may be affected")
 		})
-		data := make([]byte, 0, x*y*3)
-		for j := bounds.Min.Y; j < bounds.Max.Y; j++ {
-			for i := bounds.Min.X; i < bounds.Max.X; i++ {
-				r, g, b, _ := img.At(i, j).RGBA()
-				data = append(data, byte(b>>8), byte(g>>8), byte(r>>8))
+		if MATCHING_MODE == gocv.IMReadGrayScale {
+			data := make([]byte, 0, x*y)
+			for j := bounds.Min.Y; j < bounds.Max.Y; j++ {
+				for i := bounds.Min.X; i < bounds.Max.X; i++ {
+					r, g, b, _ := img.At(i, j).RGBA()
+					gray := byte((19595*uint32(r) + 38470*uint32(g) + 7471*uint32(b)) >> 16)
+					data = append(data, gray)
+				}
 			}
+			src, err = gocv.NewMatFromBytes(y, x, gocv.MatTypeCV8UC1, data)
+			if err != nil {
+				return err
+			}
+			defer src.Close()
+		} else {
+			data := make([]byte, 0, x*y*3)
+			for j := bounds.Min.Y; j < bounds.Max.Y; j++ {
+				for i := bounds.Min.X; i < bounds.Max.X; i++ {
+					r, g, b, _ := img.At(i, j).RGBA()
+					data = append(data, byte(b>>8), byte(g>>8), byte(r>>8))
+				}
+			}
+			src, err = gocv.NewMatFromBytes(y, x, gocv.MatTypeCV8UC3, data)
+			if err != nil {
+				return err
+			}
+			defer src.Close()
 		}
-		src, err := gocv.NewMatFromBytes(y, x, gocv.MatTypeCV8UC3, data)
-		if err != nil {
-			return err
-		}
-		defer src.Close()
 	}
 
+	if MATCHING_MODE == gocv.IMReadGrayScale {
+		return gocv.CvtColor(src, dst, gocv.ColorRGBAToGray)
+	}
 	return gocv.CvtColor(src, dst, gocv.ColorRGBAToBGR)
 }
 

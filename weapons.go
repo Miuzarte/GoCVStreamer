@@ -220,7 +220,7 @@ func (w *Weapon) DecodeFrom(path string) error {
 	integer, fraction = math.Modf(w.SpeedAlternative)
 	w.SpeedAlternativeInt, w.SpeedAlternativeFrac = int(integer), uint(math.Round(fraction*10))
 
-	err = w.Template.IMReadFrom(path, CREATE_MASK)
+	err = w.Template.IMReadFrom(path, CREATE_MASK, MATCHING_MODE)
 	if err != nil {
 		return fmt.Errorf("weapon %s failed to IMRead: %w", w.Name, err)
 	}
