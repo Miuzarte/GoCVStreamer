@@ -51,42 +51,9 @@ var window app.Window
 var (
 	dScale unit.Metric
 	mTheme = material.NewTheme()
-
-	shortcuts = widgets.NewShortcuts(&window,
-		widgets.NewShortcut(key.NameSpace).
-			Do(shortcutListWeapons),
-
-		widgets.NewShortcut("W", "w").
-			Do(shortcutReloadWeapons),
-
-		widgets.NewShortcut("P", "p").
-			Do(shortcutPrintProcess),
-
-		widgets.NewShortcut("F", "f").
-			Do(shortcutResetFreamsElapsed),
-
-		widgets.NewShortcut("D", "d").
-			Do(shortcutToggleDraw),
-
-		widgets.NewShortcut("B", "b").
-			Do(shortcutToggleDebug),
-
-		widgets.NewShortcut("R", "r",
-			key.NameUpArrow, key.NameDownArrow,
-			key.NameLeftArrow, key.NameRightArrow).
-			Do(shortcutMoveRoiRect),
-
-		widgets.NewShortcut("T", "t").
-			Do(shortcutSetWda),
-
-		widgets.NewShortcut("I", "i",
-			"0", "1", "2", "3", "4",
-			"5", "6", "7", "8", "9",
-			".", "-", key.NameReturn,
-			key.NameDeleteBackward).
-			Do(shortcutStartInput),
-	)
 )
+
+var shortcuts widgets.Shortcuts
 
 func init() {
 	mTheme.Fg = color.NRGBA(colorCoral)
@@ -95,6 +62,43 @@ func init() {
 	mTheme.ContrastBg = color.NRGBA(colorCoral)
 	mTheme.Face = "Maple Mono Normal NF CN"
 	widgets.Theme = mTheme
+
+	if !*nogui {
+		shortcuts = widgets.NewShortcuts(&window,
+			widgets.NewShortcut(key.NameSpace).
+				Do(shortcutListWeapons),
+
+			widgets.NewShortcut("W", "w").
+				Do(shortcutReloadWeapons),
+
+			widgets.NewShortcut("P", "p").
+				Do(shortcutPrintProcess),
+
+			widgets.NewShortcut("F", "f").
+				Do(shortcutResetFreamsElapsed),
+
+			widgets.NewShortcut("D", "d").
+				Do(shortcutToggleDraw),
+
+			widgets.NewShortcut("B", "b").
+				Do(shortcutToggleDebug),
+
+			widgets.NewShortcut("R", "r",
+				key.NameUpArrow, key.NameDownArrow,
+				key.NameLeftArrow, key.NameRightArrow).
+				Do(shortcutMoveRoiRect),
+
+			widgets.NewShortcut("T", "t").
+				Do(shortcutSetWda),
+
+			widgets.NewShortcut("I", "i",
+				"0", "1", "2", "3", "4",
+				"5", "6", "7", "8", "9",
+				".", "-", key.NameReturn,
+				key.NameDeleteBackward).
+				Do(shortcutStartInput),
+		)
+	}
 }
 
 func layoutDisplay(gtx layout.Context, img image.Image) {

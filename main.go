@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"flag"
 	"fmt"
 	"image"
 	"io"
@@ -38,6 +39,8 @@ const (
 )
 
 var debugging = DEBUGGING
+
+var nogui = flag.Bool("nogui", false, "run without GUI window")
 
 var log = logger.New("Streamer")
 
@@ -128,17 +131,21 @@ func debuggingWaitForInput() (_ struct{}) {
 }
 
 func init() {
+	flag.Parse()
+
 	var err error
 
-	if windowTitle == "" {
-		log.Panic().
-			Msg("failed to initialize window name")
+	if !*nogui {
+		if windowTitle == "" {
+			log.Panic().
+				Msg("failed to initialize window name")
+		}
+		window.Option(
+			app.Title(windowTitle),
+			app.MinSize(1280, 720),
+			app.Size(1280, 720),
+		)
 	}
-	window.Option(
-		app.Title(windowTitle),
-		app.MinSize(1280, 720),
-		app.Size(1280, 720),
-	)
 
 	err = windows.SetPriorityClass(windows.CurrentProcess(), windows.HIGH_PRIORITY_CLASS)
 	if err != nil {
@@ -189,15 +196,21 @@ func main() {
 		var err error
 		err = capturer.Close()
 		if err != nil {
-			log.Error().Err(err).Msg("failed to close capturer")
+			log.Error().
+				Err(err).
+				Msg("failed to close capturer")
 		}
 		err = weapons.Close()
 		if err != nil {
-			log.Error().Err(err).Msg("failed to close weapons")
+			log.Error().
+				Err(err).
+				Msg("failed to close weapons")
 		}
 		err = luaFile.Close()
 		if err != nil {
-			log.Error().Err(err).Msg("failed to close luaFile")
+			log.Error().
+				Err(err).
+				Msg("failed to close luaFile")
 		}
 	}()
 
@@ -212,21 +225,21 @@ func main() {
 		luaSwitchingLoop(ctx)
 	})
 	cwg.Go(func(ctx context.Context) {
-		defer cwg.Cancel()
-		windowLoop(ctx)
-	})
-	cwg.Go(func(ctx context.Context) {
-		<-ctx.Done()
-		// using ctrl c to exit in console
-		// telling the window on background to response
-		window.Invalidate()
-	})
-	cwg.Go(func(ctx context.Context) {
 		tmplWatchLoop(ctx)
 	})
 	cwg.Go(func(ctx context.Context) {
 		tmplMatchLoop(ctx)
 	})
+	if !*nogui {
+		cwg.Go(func(ctx context.Context) {
+			defer cwg.Cancel()
+			windowLoop(ctx)
+		})
+		cwg.Go(func(ctx context.Context) {
+			<-ctx.Done()
+			window.Invalidate()
+		})
+	}
 
 	cwg.Wait()
 }
@@ -662,7 +675,9 @@ func tmplMatchLoop(ctx context.Context) {
 				weaponIndexSignal <- WEAPON_INDEX_NONE
 			}
 
-			window.Invalidate()
+			if !*nogui {
+				window.Invalidate()
+			}
 		}
 	}
 }
