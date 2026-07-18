@@ -15,47 +15,73 @@ import (
 
 const CREATE_MASK = false
 
+type WeaponSlot int
+
+const (
+	// WEAPON_SLOT_UNDEFINED = 0
+	WEAPON_SLOT_PRIMARY   = 1 << 0
+	WEAPON_SLOT_SECONDARY = 1 << 1
+	WEAPON_SLOT_MIX       = WEAPON_SLOT_PRIMARY | WEAPON_SLOT_SECONDARY
+)
+
+func (ws WeaponSlot) Has(other WeaponSlot) bool {
+	return ws&other != 0
+}
+
+func (ws WeaponSlot) Is(other WeaponSlot) bool {
+	return ws == other
+}
+
+func (ws WeaponSlot) String() string {
+	switch ws {
+	case WEAPON_SLOT_PRIMARY:
+		return "Primary"
+	case WEAPON_SLOT_SECONDARY:
+		return "Secondary"
+	case WEAPON_SLOT_MIX:
+		return "Mix"
+	default:
+		return fmt.Sprintf("unexpected value of weapon slot: %d", ws)
+	}
+}
+
 type WeaponType int
 
 const (
-	WEAPON_TYPE_MACHINE_PISTOL WeaponType = iota + 1
-	WEAPON_TYPE_SUBMACHINE_GUN
-	WEAPON_TYPE_ASSAULT_RIFLE
-	WEAPON_TYPE_LIGHT_MACHINE_GUN
-	WEAPON_TYPE_SEMI_AUTO
+	WEAPON_TYPE_UNDEFINED = 0
+	WEAPON_TYPE_FULL_AUTO = 1 << 0 // 全自动
+	WEAPON_TYPE_SEMI_AUTO = 1 << 1 // 半自动
+	// 都存在 (如独头霰弹 ACS12(FA) / BOSG.12.2(SA))
+	WEAPON_TYPE_MIX = WEAPON_TYPE_FULL_AUTO | WEAPON_TYPE_SEMI_AUTO
 )
+
+func (wt WeaponType) Has(other WeaponType) bool {
+	return wt&other != 0
+}
+
+func (wt WeaponType) Is(other WeaponType) bool {
+	return wt == other
+}
 
 func (wt WeaponType) string(short bool) string {
 	switch wt {
-	case WEAPON_TYPE_MACHINE_PISTOL:
+	case WEAPON_TYPE_FULL_AUTO:
 		if short {
-			return "MP"
+			return "FA"
 		} else {
-			return "MachinePistol"
-		}
-	case WEAPON_TYPE_SUBMACHINE_GUN:
-		if short {
-			return "SG"
-		} else {
-			return "SubmachineGun"
-		}
-	case WEAPON_TYPE_ASSAULT_RIFLE:
-		if short {
-			return "AR"
-		} else {
-			return "AssaultRifle"
-		}
-	case WEAPON_TYPE_LIGHT_MACHINE_GUN:
-		if short {
-			return "MG"
-		} else {
-			return "LightMachineGun"
+			return "Full Auto"
 		}
 	case WEAPON_TYPE_SEMI_AUTO:
 		if short {
 			return "SA"
 		} else {
-			return "SemiAuto"
+			return "Semi Auto"
+		}
+	case WEAPON_TYPE_MIX:
+		if short {
+			return "MIX"
+		} else {
+			return "Mix"
 		}
 	default:
 		return fmt.Sprintf("unexpected value of weapon type: %d", wt)
@@ -66,96 +92,252 @@ func (wt WeaponType) String() string {
 	return wt.string(false)
 }
 
-var OffsetTable = [...]int{
-	0:                             0,
-	WEAPON_TYPE_MACHINE_PISTOL:    -2,
-	WEAPON_TYPE_SUBMACHINE_GUN:    -2,
-	WEAPON_TYPE_ASSAULT_RIFLE:     -2,
-	WEAPON_TYPE_LIGHT_MACHINE_GUN: -2,
-	WEAPON_TYPE_SEMI_AUTO:         -2,
-}
-
-func (wt WeaponType) SpeedOffset() int {
-	return OffsetTable[wt]
-}
-
-func ParseWeaponType(typ string) (WeaponType, error) {
-	switch typ {
-	case "MP":
-		return WEAPON_TYPE_MACHINE_PISTOL, nil
-	case "SG":
-		return WEAPON_TYPE_SUBMACHINE_GUN, nil
-	case "AR":
-		return WEAPON_TYPE_ASSAULT_RIFLE, nil
-	case "LMG", "MG":
-		return WEAPON_TYPE_LIGHT_MACHINE_GUN, nil
-	case "SA":
-		return WEAPON_TYPE_SEMI_AUTO, nil
-	default:
-		return 0, fmt.Errorf("invalid weapon type: %s", typ)
-	}
-}
-
-type WeaponMode int
+type WeaponClass int
 
 const (
-	WEAPON_MODE_FULL_AUTO WeaponMode = iota + 1
-	WEAPON_MODE_SEMI_AUTO
+	_ WeaponClass = iota
+
+	// (主) (全自动) AR  突击步枪
+	WEAPON_CLASS_ASSAULT_RIFLE
+
+	// (主)          GG  装备
+	WEAPON_CLASS_GADGET
+
+	// (副) (半自动) HC  手持加农炮
+	WEAPON_CLASS_HAND_CANNON
+
+	// (副) (半自动) HG  手枪
+	WEAPON_CLASS_HANDGUN
+
+	// (主) (全自动) LMG 轻机枪
+	WEAPON_CLASS_LIGHT_MACHINE_GUN
+
+	// (副) (全自动) MP  自动手枪
+	WEAPON_CLASS_MACHINE_PISTOL
+
+	// (主) (半自动) MR  射手步枪
+	WEAPON_CLASS_MARKSMAN_RIFLE
+
+	// (副) (半自动) RV  左轮手枪
+	WEAPON_CLASS_REVOLVER
+
+	// (主/副) (半自动) SG 霰弹枪
+	WEAPON_CLASS_SHOTGUN
+
+	// (主) (全自动) SMG 冲锋枪
+	WEAPON_CLASS_SUBMACHINE_GUN
+
+	// (主) (半自动) SR  狙击步枪
+	WEAPON_CLASS_SNIPER_RIFLE
+
+	// (主) (全/半)  SSG 使用独头弹的霰弹枪
+	WEAPON_CLASS_SLUG_SHOTGUN
 )
 
-func (wm WeaponMode) string(short bool) string {
-	switch wm {
-	case WEAPON_MODE_FULL_AUTO:
-		if short {
-			return "FA"
-		} else {
-			return "FullAuto"
-		}
-	case WEAPON_MODE_SEMI_AUTO:
-		if short {
-			return "SA"
-		} else {
-			return "SemiAuto"
-		}
-	default:
-		return fmt.Sprintf("unexpected value of weapon mode: %d", wm)
+type WeaponClassDetail struct {
+	Slot  WeaponSlot
+	Type  WeaponType
+	Class WeaponClass
+
+	ShortName string
+	FullName  string
+
+	// = 0, 让 lua 方决定
+	Offset int
+}
+
+var weaponClassDetails = [...]WeaponClassDetail{
+	0: {},
+
+	WEAPON_CLASS_ASSAULT_RIFLE: {
+		WEAPON_SLOT_PRIMARY,
+		WEAPON_TYPE_FULL_AUTO,
+		WEAPON_CLASS_ASSAULT_RIFLE,
+
+		"AR",
+		"Assault Rifle",
+
+		0,
+	},
+
+	WEAPON_CLASS_GADGET: {
+		WEAPON_SLOT_PRIMARY, // 暂时没有放在副手的装备
+		WEAPON_TYPE_UNDEFINED,
+		WEAPON_CLASS_GADGET,
+
+		"GG",
+		"Gadget",
+
+		0,
+	},
+
+	WEAPON_CLASS_HAND_CANNON: {
+		WEAPON_SLOT_SECONDARY,
+		WEAPON_TYPE_SEMI_AUTO,
+		WEAPON_CLASS_HAND_CANNON,
+
+		"HC",
+		"Hand Cannon",
+
+		0,
+	},
+
+	WEAPON_CLASS_HANDGUN: {
+		WEAPON_SLOT_SECONDARY,
+		WEAPON_TYPE_SEMI_AUTO,
+		WEAPON_CLASS_HANDGUN,
+
+		"HG",
+		"Handgun",
+
+		0,
+	},
+
+	WEAPON_CLASS_LIGHT_MACHINE_GUN: {
+		WEAPON_SLOT_PRIMARY,
+		WEAPON_TYPE_FULL_AUTO,
+		WEAPON_CLASS_LIGHT_MACHINE_GUN,
+
+		"LMG",
+		"Light Machine Gun",
+
+		0,
+	},
+
+	WEAPON_CLASS_MACHINE_PISTOL: {
+		WEAPON_SLOT_SECONDARY,
+		WEAPON_TYPE_FULL_AUTO,
+		WEAPON_CLASS_MACHINE_PISTOL,
+
+		"MP",
+		"Machine Pistol",
+
+		0,
+	},
+
+	WEAPON_CLASS_MARKSMAN_RIFLE: {
+		WEAPON_SLOT_PRIMARY,
+		WEAPON_TYPE_SEMI_AUTO,
+		WEAPON_CLASS_MARKSMAN_RIFLE,
+
+		"MR",
+		"Marksman Rifle",
+
+		0,
+	},
+
+	WEAPON_CLASS_REVOLVER: {
+		WEAPON_SLOT_SECONDARY,
+		WEAPON_TYPE_SEMI_AUTO,
+		WEAPON_CLASS_REVOLVER,
+
+		"RV",
+		"Revolver",
+
+		0,
+	},
+
+	WEAPON_CLASS_SHOTGUN: {
+		WEAPON_SLOT_MIX,
+		WEAPON_TYPE_SEMI_AUTO,
+		WEAPON_CLASS_SHOTGUN,
+
+		"SG",
+		"Shotgun",
+
+		0,
+	},
+
+	WEAPON_CLASS_SUBMACHINE_GUN: {
+		WEAPON_SLOT_PRIMARY,
+		WEAPON_TYPE_FULL_AUTO,
+		WEAPON_CLASS_SUBMACHINE_GUN,
+
+		"SMG",
+		"Submachine Gun",
+
+		0,
+	},
+
+	WEAPON_CLASS_SNIPER_RIFLE: {
+		WEAPON_SLOT_PRIMARY,
+		WEAPON_TYPE_SEMI_AUTO,
+		WEAPON_CLASS_SNIPER_RIFLE,
+
+		"SR",
+		"Sniper Rifle",
+
+		0,
+	},
+
+	WEAPON_CLASS_SLUG_SHOTGUN: {
+		WEAPON_SLOT_PRIMARY,
+		WEAPON_TYPE_MIX,
+		WEAPON_CLASS_SLUG_SHOTGUN,
+
+		"SSG",
+		"Slug Shotgun",
+
+		0,
+	},
+}
+
+func (wc WeaponClass) Detail() *WeaponClassDetail {
+	// let it panic if oob
+	return &weaponClassDetails[wc]
+}
+
+func (wc WeaponClass) string(short bool) string {
+	if short {
+		return wc.Detail().ShortName
+	} else {
+		return wc.Detail().FullName
 	}
 }
 
-func (wm WeaponMode) String() string {
-	return wm.string(false)
+func (wc WeaponClass) String() string {
+	return wc.string(false)
 }
 
-func ParseWeaponMode(mode string) (WeaponMode, error) {
-	switch mode {
-	case "FA":
-		return WEAPON_MODE_FULL_AUTO, nil
-	case "SA":
-		return WEAPON_MODE_SEMI_AUTO, nil
-	default:
-		return 0, fmt.Errorf("invalid weapon mode: %s", mode)
+func ParseWeaponClass(className string) WeaponClass {
+	// 先判断短名字, 一般用这个
+	for _, wcd := range weaponClassDetails {
+		if className == wcd.ShortName {
+			return wcd.Class
+		}
 	}
+	for _, wcd := range weaponClassDetails {
+		if className == wcd.FullName {
+			return wcd.Class
+		}
+	}
+	return 0
 }
 
-const WEAPON_PARAMS_NUM = 4
+const (
+	WEAPON_PARAM_CLASS = iota
+	WEAPON_PARAM_SPEED_MAIN
+	WEAPON_PARAM_SPEED_ALT
+	WEAPON_PARAM_COUNT
+)
 
 const (
 	SPEED_ALTERNATIVE_RATIO = 0.7
-	SPEED_SIGN_AUTO         = "--"
-	SPEED_SIGN_COPY         = "=="
+	SPEED_SIGN_AUTO         = "--" // *0.7
+	SPEED_SIGN_COPY         = "==" // *1
 )
 
 type Weapon struct {
-	Path                 string
-	Name                 string
-	Type                 WeaponType
-	Mode                 WeaponMode
-	SpeedMain            float64
-	SpeedMainInt         int
-	SpeedMainFrac        uint
-	SpeedAlternative     float64
-	SpeedAlternativeInt  int
-	SpeedAlternativeFrac uint
+	Path  string
+	Name  string
+	Class WeaponClass
+	// Type WeaponType
+	SpeedMain     float64
+	SpeedMainInt  int
+	SpeedMainFrac uint
+	SpeedAlt      float64
+	SpeedAltInt   int
+	SpeedAltFrac  uint
 
 	template.Template
 	luaBuf bytes.Buffer
@@ -163,10 +345,11 @@ type Weapon struct {
 
 func (w *Weapon) String() string {
 	return fmt.Sprintf(
-		"{%s_%s_%02d.%d_%02d.%d} %s",
-		w.Mode.string(true), w.Type.string(true),
+		"{%s_%02d.%d_%02d.%d} %s",
+		// w.Type.string(true),
+		w.Class.string(true),
 		w.SpeedMainInt, w.SpeedMainFrac,
-		w.SpeedAlternativeInt, w.SpeedAlternativeFrac,
+		w.SpeedAltInt, w.SpeedAltFrac,
 		w.Name,
 	)
 }
@@ -190,35 +373,32 @@ func (w *Weapon) DecodeFrom(path string) error {
 
 	w.Path = path
 	w.Name = name
-	w.Mode, err = ParseWeaponMode(params[0])
-	if err != nil {
-		return err
-	}
-	w.Type, err = ParseWeaponType(params[1])
-	if err != nil {
-		return err
-	}
+	// [WEAPON_PARAM_CLASS]
+	w.Class = ParseWeaponClass(params[WEAPON_PARAM_CLASS])
+	// w.Type = w.Class.Detail().Type
 
-	w.SpeedMain, err = strconv.ParseFloat(params[2], 64)
+	// [WEAPON_PARAM_SPEED_MAIN]
+	w.SpeedMain, err = strconv.ParseFloat(params[WEAPON_PARAM_SPEED_MAIN], 64)
 	if err != nil {
 		return err
 	}
 	integer, fraction := math.Modf(w.SpeedMain)
 	w.SpeedMainInt, w.SpeedMainFrac = int(integer), uint(math.Round(fraction*10))
 
-	switch params[3] {
+	// [WEAPON_PARAM_SPEED_ALT]
+	switch params[WEAPON_PARAM_SPEED_ALT] {
 	case SPEED_SIGN_AUTO:
-		w.SpeedAlternative = w.SpeedMain * SPEED_ALTERNATIVE_RATIO
+		w.SpeedAlt = w.SpeedMain * SPEED_ALTERNATIVE_RATIO
 	case SPEED_SIGN_COPY:
-		w.SpeedAlternative = w.SpeedMain
+		w.SpeedAlt = w.SpeedMain
 	default:
-		w.SpeedAlternative, err = strconv.ParseFloat(params[3], 64)
+		w.SpeedAlt, err = strconv.ParseFloat(params[WEAPON_PARAM_SPEED_ALT], 64)
 		if err != nil {
 			return err
 		}
 	}
-	integer, fraction = math.Modf(w.SpeedAlternative)
-	w.SpeedAlternativeInt, w.SpeedAlternativeFrac = int(integer), uint(math.Round(fraction*10))
+	integer, fraction = math.Modf(w.SpeedAlt)
+	w.SpeedAltInt, w.SpeedAltFrac = int(integer), uint(math.Round(fraction*10))
 
 	err = w.Template.IMReadFrom(path, CREATE_MASK, MATCHING_MODE)
 	if err != nil {
@@ -231,14 +411,14 @@ func (w *Weapon) SpeedMainWOffset() (int, uint) {
 	if w.SpeedMain == 0 {
 		return 0, 0
 	}
-	return w.SpeedMainInt + w.Type.SpeedOffset(), w.SpeedMainFrac
+	return w.SpeedMainInt + w.Class.Detail().Offset, w.SpeedMainFrac
 }
 
 func (w *Weapon) SpeedAlternativeWOffset() (int, uint) {
-	if w.SpeedAlternative == 0 {
+	if w.SpeedAlt == 0 {
 		return 0, 0
 	}
-	return w.SpeedAlternativeInt + w.Type.SpeedOffset(), w.SpeedAlternativeFrac
+	return w.SpeedAltInt + w.Class.Detail().Offset, w.SpeedAltFrac
 }
 
 func (w *Weapon) GetAllSpeeds(orig bool) (speedMain int, speedMainF uint, speedAlt int, speedAltF uint) {
@@ -248,7 +428,7 @@ func (w *Weapon) GetAllSpeeds(orig bool) (speedMain int, speedMainF uint, speedA
 	} else {
 		// debugging, use orig
 		speedMain, speedMainF = w.SpeedMainInt, w.SpeedMainFrac
-		speedAlt, speedAltF = w.SpeedAlternativeInt, w.SpeedAlternativeFrac
+		speedAlt, speedAltF = w.SpeedAltInt, w.SpeedAltFrac
 	}
 	return
 }
@@ -274,8 +454,8 @@ func (w *Weapon) Lua(orig bool) []byte {
 
 	speedMain, speedMainF, speedAlt, speedAltF := FastItoa4(w.GetAllSpeeds(orig))
 
-	switch w.Mode {
-	case WEAPON_MODE_FULL_AUTO:
+	d := w.Class.Detail()
+	if d.Type.Has(WEAPON_TYPE_FULL_AUTO) {
 		w.luaBuf.WriteString("FAM=")
 		w.luaBuf.WriteString(speedMain)
 		w.luaBuf.WriteByte('\n')
@@ -288,9 +468,10 @@ func (w *Weapon) Lua(orig bool) []byte {
 		w.luaBuf.WriteString("FAAF=")
 		w.luaBuf.WriteString(speedAltF)
 		w.luaBuf.WriteByte('\n')
-		w.luaBuf.WriteString(DEFAULT_CONTENT_SEMI_AUTO)
-
-	case WEAPON_MODE_SEMI_AUTO:
+	} else {
+		w.luaBuf.WriteString(DEFAULT_CONTENT_FULL_AUTO)
+	}
+	if d.Type.Has(WEAPON_TYPE_SEMI_AUTO) {
 		w.luaBuf.WriteString("SAM=")
 		w.luaBuf.WriteString(speedMain)
 		w.luaBuf.WriteByte('\n')
@@ -303,12 +484,8 @@ func (w *Weapon) Lua(orig bool) []byte {
 		w.luaBuf.WriteString("SAAF=")
 		w.luaBuf.WriteString(speedAltF)
 		w.luaBuf.WriteByte('\n')
-		w.luaBuf.WriteString(DEFAULT_CONTENT_FULL_AUTO)
-
-	default:
-		log.Panic().
-			Int("weaponMode", int(w.Mode)).
-			Msg("unexpected Weapon.Mode")
+	} else {
+		w.luaBuf.WriteString(DEFAULT_CONTENT_SEMI_AUTO)
 	}
 
 	return w.luaBuf.Bytes()
@@ -316,15 +493,15 @@ func (w *Weapon) Lua(orig bool) []byte {
 
 type Weapons []*Weapon
 
-func parseFileName(path string) (name string, params [WEAPON_PARAMS_NUM]string, err error) {
-	base := filepath.Base(path) // "{FA_SG_13.0_13.0} 9x19VSN.png"
+func parseFileName(path string) (name string, params [WEAPON_PARAM_COUNT]string, err error) {
+	base := filepath.Base(path) // "{SMG_9_==} 9x19VSN.png"
 	dotI := strings.LastIndexByte(base, '.')
 	if dotI < 0 {
 		err = fmt.Errorf("invalid file name: %s", base)
 		return
 	}
 
-	filename := base[:dotI] // "{FA_SG_13.0_13.0} 9x19VSN"
+	filename := base[:dotI] // "{SMG_9_==} 9x19VSN"
 
 	bracesL, bracesR := strings.IndexByte(filename, '{'), strings.IndexByte(filename, '}')
 	if bracesL < 0 || bracesR < 0 {
@@ -332,9 +509,9 @@ func parseFileName(path string) (name string, params [WEAPON_PARAMS_NUM]string, 
 		return
 	}
 
-	p := filename[bracesL+1 : bracesR] // FA_SG_13.0_13.0
-	ps := strings.Split(p, "_")        // ["FA", "SG", "13.0", "13.0"]
-	if len(ps) != WEAPON_PARAMS_NUM {
+	p := filename[bracesL+1 : bracesR] // SMG_9_==
+	ps := strings.Split(p, "_")        // ["SMG", "9", "=="]
+	if len(ps) != WEAPON_PARAM_COUNT {
 		err = fmt.Errorf("invalid weapon params: %s", params)
 		return
 	}

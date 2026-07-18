@@ -53,7 +53,6 @@ const (
 var inIdle = false
 
 const (
-	// [TODO] use embed?
 	TEMPLATES_DIRECTORY     = "templates"
 	TEMPLATES_SUFFIX        = ".png"
 	TEMPLATES_PREFIX_IGNORE = "__"
@@ -93,7 +92,6 @@ const WEAPON_INDEX_NONE = -1
 
 const MATCHING_MODE gocv.IMReadFlag = gocv.IMReadGrayScale
 
-// [TODO]? dynamic threshold
 const MATCH_THRESHOLD = 0.9
 
 var (
@@ -473,10 +471,10 @@ func modWeapon(mainOrAlt bool, newSpeed string) {
 	var speedMain, speedAlt string
 	if !mainOrAlt {
 		speedMain = newSpeed
-		if orig.SpeedAlternativeFrac != 0 {
-			speedAlt = fmt.Sprintf("%d.%d", orig.SpeedAlternativeInt, orig.SpeedAlternativeFrac)
+		if orig.SpeedAltFrac != 0 {
+			speedAlt = fmt.Sprintf("%d.%d", orig.SpeedAltInt, orig.SpeedAltFrac)
 		} else {
-			speedAlt = fmt.Sprintf("%d", orig.SpeedAlternativeInt)
+			speedAlt = fmt.Sprintf("%d", orig.SpeedAltInt)
 		}
 	} else {
 		if orig.SpeedMainFrac != 0 {
@@ -487,8 +485,9 @@ func modWeapon(mainOrAlt bool, newSpeed string) {
 		speedAlt = newSpeed
 	}
 
-	newName := fmt.Sprintf("{%s_%s_%s_%s} %s%s",
-		orig.Mode.string(true), orig.Type.string(true),
+	newName := fmt.Sprintf("{%s_%s_%s} %s%s",
+		// orig.Type.string(true),
+		orig.Class.string(true),
 		speedMain, speedAlt,
 		orig.Name, ext,
 	)

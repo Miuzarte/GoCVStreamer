@@ -39,9 +39,10 @@ func shortcutListWeapons(key.Name, key.Modifiers) {
 
 		speedMain, speedMainF, speedAlt, speedAltF := w.GetAllSpeeds(debugging)
 		fmt.Fprintf(os.Stdout,
-			"[%0*d] {%s_%s_%02d.%d_%02d.%d} %-*s %.2f%%\n",
+			"[%0*d] {%s_%02d.%d_%02d.%d} %-*s %.2f%%\n",
 			indexLength, i,
-			w.Mode.string(true), w.Type.string(true),
+			// w.Type.string(true),
+			w.Class.string(true),
 			speedMain, speedMainF, speedAlt, speedAltF,
 			weaponNameLongest, w.Name,
 			w.Template.MaxVal*100,
