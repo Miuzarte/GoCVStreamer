@@ -111,14 +111,12 @@ var (
 var fpsCounter = fps.NewCounter(SAMPLE_INTERVAL)
 
 var (
-	inIdle              = false
-	narrowing           = false
-	luaFile             *os.File
-	luaFileContentIndex = WEAPON_INDEX_NONE
-	luaFileContent      []byte
-	luaToNoneDebounce   bool
-	luaLastSwitchToNone time.Time
-	weaponIndexSignal   = make(chan int, 1)
+	inIdle               = false
+	narrowing            = false
+	currentWeaponIndex   = WEAPON_INDEX_NONE
+	currentWeaponDisplay string
+	weaponIndexSignal    = make(chan int, 1)
+	r6sEngine            *Engine
 )
 
 var _ = debuggingWaitForInput()
@@ -174,13 +172,6 @@ func init() {
 	selectDisplay()
 
 	loadTemplates()
-
-	luaFile, err = os.OpenFile("speed.lua", os.O_WRONLY|os.O_CREATE, 0o664)
-	if err != nil {
-		log.Panic().
-			Err(err).
-			Msg("failed to open file")
-	}
 }
 
 func loadTemplates() {
@@ -216,12 +207,6 @@ func main() {
 				Err(err).
 				Msg("failed to close weapons")
 		}
-		err = luaFile.Close()
-		if err != nil {
-			log.Error().
-				Err(err).
-				Msg("failed to close luaFile")
-		}
 	}()
 
 	cwg := cwg.New(context.Background())
@@ -238,7 +223,7 @@ func main() {
 		cpuMeasureLoop(ctx)
 	})
 	cwg.Go(func(ctx context.Context) {
-		luaSwitchingLoop(ctx)
+		r6sLoop(ctx)
 	})
 	cwg.Go(func(ctx context.Context) {
 		tmplWatchLoop(ctx)
@@ -275,88 +260,74 @@ func cpuMeasureLoop(ctx context.Context) {
 
 var forceUpdate = false
 
-func luaSwitchingLoop(ctx context.Context) {
+func r6sLoop(ctx context.Context) {
 	// the actual duration is exactly a second,
 	// more for template matching loop delay
 	const debounceInterval = time.Millisecond * 1500
 
-	writeLua := func(newIndex int) {
+	lastIndex := WEAPON_INDEX_NONE
+	var toNoneDebounce bool
+	var lastSwitchToNone time.Time
+
+	engine := newEngine(newClicker(ctx))
+	r6sEngine = engine
+	defer engine.Close()
+
+	applyWeapon := func(newIndex int) {
 		weaponsMu.RLock()
 		defer weaponsMu.RUnlock()
 
-		var from *w.Weapon
-		fromName := "N/A"
-		var fromVal float32
-		if luaFileContentIndex >= 0 {
-			from = weapons[luaFileContentIndex]
-			fromName = from.String()
-			fromVal = from.Template.MaxVal
-		}
-
 		var to *w.Weapon
 		toName := "N/A"
-		var toVal float32
 		if newIndex >= 0 {
 			to = weapons[newIndex]
 			toName = to.String()
-			toVal = to.Template.MaxVal
 		}
 
 		if newIndex >= 0 {
-			luaToNoneDebounce = false
+			toNoneDebounce = false
 		}
 
 		if forceUpdate {
 			forceUpdate = false
-		} else if newIndex == luaFileContentIndex {
+		} else if newIndex == lastIndex {
 			return
 		} else {
-			if MATCHING_MISJUDGEMENT_ALERT &&
-				luaFileContentIndex >= 0 && newIndex >= 0 {
-				os.Stderr.Write([]byte{'\a'})
-			}
 			log.Debug().
-				Int("fromIndex", luaFileContentIndex).
+				Int("fromIndex", lastIndex).
 				Int("toIndex", newIndex).
-				Str("fromName", fromName).
 				Str("toName", toName).
-				Float32("fromVal", fromVal).
-				Float32("toVal", toVal).
 				Msg("switching weapon")
 		}
 
 		// no debounce when debugging
-		if !debugging && luaFileContentIndex >= 0 && newIndex == WEAPON_INDEX_NONE {
+		if !debugging && lastIndex >= 0 && newIndex == WEAPON_INDEX_NONE {
 			// from notnone to none
-			if !luaToNoneDebounce {
+			if !toNoneDebounce {
 				// going to none, enter debounce
-				luaToNoneDebounce = true
-				luaLastSwitchToNone = time.Now()
+				toNoneDebounce = true
+				lastSwitchToNone = time.Now()
 				return
 			} else {
 				// debounce skipping
-				timeToNone := luaLastSwitchToNone.Add(debounceInterval)
+				timeToNone := lastSwitchToNone.Add(debounceInterval)
 				if time.Now().Before(timeToNone) {
 					log.Debug().Msg("switching skipped due to debounce")
 					return
 				}
 				// exit debounce
-				luaToNoneDebounce = false
+				toNoneDebounce = false
 			}
 		}
 
-		luaFileContentIndex = newIndex
-		luaFileContent = to.Lua(debugging)
-
-		err := luaFile.Truncate(0)
-		panicIf(err)
-		_, err = luaFile.Seek(0, io.SeekStart)
-		panicIf(err)
-		_, err = luaFile.Write(luaFileContent)
-		panicIf(err)
-		err = luaFile.Sync()
-		panicIf(err)
+		lastIndex = newIndex
+		currentWeaponIndex = newIndex
+		currentWeaponDisplay = to.DisplaySpeed(debugging)
+		engine.SetWeapon(to)
 	}
+
+	ticker := time.NewTicker(time.Second / 125)
+	defer ticker.Stop()
 
 	for {
 		select {
@@ -364,7 +335,9 @@ func luaSwitchingLoop(ctx context.Context) {
 			return
 		case newIndex := <-weaponIndexSignal:
 			// using closure for mutex control
-			writeLua(newIndex)
+			applyWeapon(newIndex)
+		case <-ticker.C:
+			engine.Tick()
 		}
 	}
 }

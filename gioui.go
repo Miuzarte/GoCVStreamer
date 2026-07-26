@@ -124,9 +124,7 @@ func layoutDisplay(gtx layout.Context, img image.Image) {
 	paint.PaintOp{}.Add(gtx.Ops)
 }
 
-var (
-	cpu float64
-)
+var cpu float64
 
 const GOCV_INFO_TEMPLATE = //
 `| FPS: {{printf "%05.2f(%.1fms)" .FpsCount .FrametimeMs}} | 截图: {{printf "%.1f" .CaptureCostMs}}ms | 0x{{printf "%04X" .FramesElapsed}} |{{if .Debugging}} DEBUG |{{end}}
@@ -156,7 +154,10 @@ func layoutMetrics(gtx layout.Context) {
 	}
 
 	metricsBuf.WriteString("\n\n")
-	metricsBuf.Write(luaFileContent)
+	metricsBuf.WriteString(currentWeaponDisplay)
+	if r6sEngine != nil {
+		fmt.Fprintf(&metricsBuf, "\nOffset: %d\nJitter: %d", r6sEngine.SpeedOffset, r6sEngine.HoriJitterBase)
+	}
 
 	widgets.Label(
 		FONT_SIZE*1.5,

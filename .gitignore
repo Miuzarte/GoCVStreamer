@@ -9,4 +9,3 @@ config.ini
 
 # *.code-workspace
 *.exe
-*.lua

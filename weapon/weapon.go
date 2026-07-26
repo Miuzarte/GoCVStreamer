@@ -1,7 +1,6 @@
 package weapon
 
 import (
-	"bytes"
 	"fmt"
 	"math"
 	"path/filepath"
@@ -9,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/Miuzarte/GoCVStreamer/template"
-	"github.com/Miuzarte/GoCVStreamer/utils"
 	"github.com/rs/zerolog/log"
 	"gocv.io/x/gocv"
 )
@@ -354,7 +352,6 @@ type Weapon struct {
 	SpeedAltFrac  uint
 
 	template.Template
-	luaBuf bytes.Buffer
 }
 
 func (w *Weapon) String() string {
@@ -456,62 +453,34 @@ func (w *Weapon) GetAllSpeeds(orig bool) (speedMain int, speedMainF uint, speedA
 	return
 }
 
-const DEFAULT_CONTENT_FULL_AUTO = "FAM=0" + "\n" +
-	"FAMF=0" + "\n" +
-	"FAA=0" + "\n" +
-	"FAAF=0" + "\n"
-
-const DEFAULT_CONTENT_SEMI_AUTO = "SAM=-1" + "\n" +
-	"SAMF=0" + "\n" +
-	"SAA=-1" + "\n" +
-	"SAAF=0" + "\n"
-
-const DEFAULT_CONTENT = DEFAULT_CONTENT_FULL_AUTO + DEFAULT_CONTENT_SEMI_AUTO
-
-func (w *Weapon) Lua(orig bool) []byte {
+func (w *Weapon) DisplaySpeed(debug bool) string {
 	if w == nil {
-		return []byte(DEFAULT_CONTENT)
+		return "No weapon"
 	}
+	spMain, spMainF, spAlt, spAltF := w.GetAllSpeeds(debug)
+	typ := w.Class.Detail().Type
 
-	w.luaBuf.Reset()
-
-	speedMain, speedMainF, speedAlt, speedAltF := utils.FastItoa4(w.GetAllSpeeds(orig))
-
-	d := w.Class.Detail()
-	if d.Type.Has(TYPE_FULL_AUTO) {
-		w.luaBuf.WriteString("FAM=")
-		w.luaBuf.WriteString(speedMain)
-		w.luaBuf.WriteByte('\n')
-		w.luaBuf.WriteString("FAMF=")
-		w.luaBuf.WriteString(speedMainF)
-		w.luaBuf.WriteByte('\n')
-		w.luaBuf.WriteString("FAA=")
-		w.luaBuf.WriteString(speedAlt)
-		w.luaBuf.WriteByte('\n')
-		w.luaBuf.WriteString("FAAF=")
-		w.luaBuf.WriteString(speedAltF)
-		w.luaBuf.WriteByte('\n')
-	} else {
-		w.luaBuf.WriteString(DEFAULT_CONTENT_FULL_AUTO)
+	var b strings.Builder
+	b.WriteString(w.Name)
+	b.WriteByte('\n')
+	if typ.Has(TYPE_FULL_AUTO) || !typ.Has(TYPE_SEMI_AUTO) {
+		fmt.Fprintf(&b, "FA: %s / %s\n",
+			formatSpeed(spMain, int(spMainF)),
+			formatSpeed(spAlt, int(spAltF)))
 	}
-	if d.Type.Has(TYPE_SEMI_AUTO) {
-		w.luaBuf.WriteString("SAM=")
-		w.luaBuf.WriteString(speedMain)
-		w.luaBuf.WriteByte('\n')
-		w.luaBuf.WriteString("SAMF=")
-		w.luaBuf.WriteString(speedMainF)
-		w.luaBuf.WriteByte('\n')
-		w.luaBuf.WriteString("SAA=")
-		w.luaBuf.WriteString(speedAlt)
-		w.luaBuf.WriteByte('\n')
-		w.luaBuf.WriteString("SAAF=")
-		w.luaBuf.WriteString(speedAltF)
-		w.luaBuf.WriteByte('\n')
-	} else {
-		w.luaBuf.WriteString(DEFAULT_CONTENT_SEMI_AUTO)
+	if typ.Has(TYPE_SEMI_AUTO) || !typ.Has(TYPE_FULL_AUTO) {
+		fmt.Fprintf(&b, "SA: %s / %s",
+			formatSpeed(spMain, int(spMainF)),
+			formatSpeed(spAlt, int(spAltF)))
 	}
+	return b.String()
+}
 
-	return w.luaBuf.Bytes()
+func formatSpeed(intPart, frac int) string {
+	if intPart < 0 {
+		return "off"
+	}
+	return fmt.Sprintf("%d.%d", intPart, frac)
 }
 
 func ParseFileName(path string) (name string, params [PARAM_COUNT]string, err error) {

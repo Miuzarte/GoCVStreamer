@@ -221,7 +221,7 @@ func shortcutStartInput(k key.Name, m key.Modifiers) {
 }
 
 func modWeapon(mainOrAlt bool, newSpeed string) {
-	if luaFileContentIndex == WEAPON_INDEX_NONE {
+	if currentWeaponIndex == WEAPON_INDEX_NONE {
 		log.Warn().Msg("weapon unselected")
 		return
 	}
@@ -235,7 +235,7 @@ func modWeapon(mainOrAlt bool, newSpeed string) {
 		newSpeed = w.SPEED_SIGN_COPY
 	}
 
-	orig := weapons[luaFileContentIndex]
+	orig := weapons[currentWeaponIndex]
 	dir := filepath.Dir(orig.Path)
 	origName := filepath.Base(orig.Path)
 	ext := filepath.Ext(origName)
