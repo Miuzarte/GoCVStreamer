@@ -12,16 +12,16 @@ type state struct {
 	lastUpdate time.Time
 }
 
-type counter struct {
+type Counter struct {
 	*state
 	UpdateInterval time.Duration
 }
 
-func NewCounter(updateInterval time.Duration) counter {
-	return counter{state: &state{}, UpdateInterval: updateInterval}
+func NewCounter(updateInterval time.Duration) Counter {
+	return Counter{state: &state{}, UpdateInterval: updateInterval}
 }
 
-func (fc *counter) update() {
+func (fc *Counter) update() {
 	fc.frameCount++
 	now := time.Now()
 
@@ -36,7 +36,7 @@ func (fc *counter) update() {
 	fc.lastCount = now
 }
 
-func (fc *counter) Count() (fps float64, frametime time.Duration) {
+func (fc *Counter) Count() (fps float64, frametime time.Duration) {
 	fc.update()
 	return fc.fps, fc.frametime
 }

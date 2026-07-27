@@ -1,4 +1,4 @@
-package capture
+package capturer
 
 import (
 	"fmt"
@@ -39,14 +39,6 @@ func New(displayIndex int) (ss *DxgiDesktopDuplicator, err error) {
 		return nil, fmt.Errorf("display index [%d] out of bounds: %d", displayIndex, numDisplays)
 	}
 
-	/*
-		// output dup has a reverse order of index (?not tested with more than 2 monitors)
-		displayIndex = maxIndex - displayIndex
-		log.Debug().
-			Int("actualDisplayIndex", displayIndex).
-			Msg("actual display index")
-	*/
-
 	ss = new(DxgiDesktopDuplicator{displayIndex: displayIndex})
 	return ss, ss.init()
 }
@@ -54,8 +46,6 @@ func New(displayIndex int) (ss *DxgiDesktopDuplicator, err error) {
 func (ss *DxgiDesktopDuplicator) init() (err error) {
 	ss.Close()
 
-	// Make thread PerMonitorV2 Dpi aware if supported on OS
-	// allows to let windows handle BGRA -> RGBA conversion and possibly more things
 	if win.IsValidDpiAwarenessContext(win.DpiAwarenessContextPerMonitorAwareV2) {
 		_, err := win.SetThreadDpiAwarenessContext(win.DpiAwarenessContextPerMonitorAwareV2)
 		if err != nil {
@@ -68,7 +58,6 @@ func (ss *DxgiDesktopDuplicator) init() (err error) {
 		}
 	}
 
-	// Setup D3D11 stuff
 	ss.device, ss.deviceCtx, err = d3d11.NewD3D11Device()
 	if err != nil {
 		return fmt.Errorf("could not create D3D11 Device: %w", err)
@@ -111,10 +100,6 @@ func (ss *DxgiDesktopDuplicator) Bounds() image.Rectangle {
 	return ss.screenBounds
 }
 
-// do this outside
-//
-//	runtime.LockOSThread()
-//	defer runtime.UnlockOSThread()
 func (ss *DxgiDesktopDuplicator) GetImage(img *image.RGBA) error {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
@@ -129,19 +114,6 @@ func (ss *DxgiDesktopDuplicator) getImage(img *image.RGBA) error {
 		if err == outputduplication.ErrNoImageYet {
 			return err
 		}
-		// if errors.Is(err, d3d.HRESULT(d3d.DXGI_ERROR_ACCESS_LOST)) {
-		/*
-			DXGI_ERROR_ACCESS_LOST if the desktop duplication interface is invalid.
-			The desktop duplication interface typically becomes invalid
-			when a different type of image is displayed on the desktop.
-			Examples of this situation are:
-				Desktop switch
-				Mode change
-				Switch from DWM on, DWM off, or other full-screen application
-			In this situation,
-			the application must release the IDXGIOutputDuplication interface
-			and create a new IDXGIOutputDuplication for the new content.
-		*/
 		log.Debug().
 			Err(err).
 			Msg("renewing duplicator")
@@ -151,7 +123,6 @@ func (ss *DxgiDesktopDuplicator) getImage(img *image.RGBA) error {
 		} else {
 			return ss.getImage(img)
 		}
-		// }
 	}
-	return err // [outputduplication.ErrNoImageYet]
+	return err
 }

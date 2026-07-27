@@ -1,4 +1,4 @@
-package sendinput
+package mouse
 
 import (
 	"syscall"

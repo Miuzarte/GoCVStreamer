@@ -2,42 +2,43 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"image"
 	"io"
+	"math/bits"
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 	"unsafe"
 
-	"gioui.org/app"
-	"gioui.org/op"
+	"gioui.org/io/key"
+	"gioui.org/layout"
 
+	"github.com/Miuzarte/GoCVStreamer/capturer"
 	cwg "github.com/Miuzarte/GoCVStreamer/contextWaitGroup"
-	"github.com/Miuzarte/GoCVStreamer/fps"
+	"github.com/Miuzarte/GoCVStreamer/detector"
+	"github.com/Miuzarte/GoCVStreamer/engine"
 	"github.com/Miuzarte/GoCVStreamer/logger"
+	"github.com/Miuzarte/GoCVStreamer/matcher"
+	"github.com/Miuzarte/GoCVStreamer/ui"
 	w "github.com/Miuzarte/GoCVStreamer/weapon"
 	ws "github.com/Miuzarte/GoCVStreamer/weapons"
-	"github.com/Miuzarte/GoCVStreamer/yolo"
+	"github.com/Miuzarte/GoCVStreamer/widgets"
 	"github.com/fsnotify/fsnotify"
-
-	"github.com/kirides/go-d3d/outputduplication"
+	"github.com/kbinani/screenshot"
 	"github.com/shirou/gopsutil/v4/process"
 	"gocv.io/x/gocv"
 	"golang.org/x/sys/windows"
-)
-
-const (
-	DRAW_NEGATIVE_RESULT        = false
-	MATCHING_MISJUDGEMENT_ALERT = false
 )
 
 var debugging = DEBUGGING
@@ -62,88 +63,33 @@ const (
 	MATCHING_MODE gocv.IMReadFlag = gocv.IMReadGrayScale
 )
 
-type moduleTag int
-
-const (
-	_ moduleTag = iota
-	tagOpenCV
-	tagYOLO
-)
-
-type captureReq struct {
-	tag      moduleTag
-	interval time.Duration
-}
-
 var (
+	processSelf     *process.Process
 	parentProcessId = os.Getppid()
 	processId       = os.Getpid()
 	windowHandel    windows.HWND
 	windowTitle     = strings.TrimSuffix(filepath.Base(os.Args[0]), ".exe")
 
-	processSelf *process.Process
+	weaponsMu sync.RWMutex
+	weapons   ws.Weapons
 )
 
 var (
-	drawEnabled = true
 	roiRectSize = image.Point{8 * 11, 8 * 13}
 	roiRectPos  = image.Point{2000, 1200}
 	// Xmid: 2045
-	defaultRoiRect = image.Rectangle{roiRectPos, roiRectPos.Add(roiRectSize)}
-	roiRect        = defaultRoiRect
+	roiRect     = image.Rectangle{roiRectPos, roiRectPos.Add(roiRectSize)}
 )
 
 var (
-	weaponsMu      sync.RWMutex
-	weapons        ws.Weapons
-	weaponIndex    int
-	weaponsMatched int
-	weaponFound    bool
-)
+	capSrv     *capturer.Server
+	matcherEng *matcher.Engine
+	detEng     *detector.Engine
+	eng        *engine.Engine
+	win        *ui.Window
 
-const WEAPON_INDEX_NONE = -1
-
-const MATCH_THRESHOLD = 0.9
-
-var (
-	lastGCStats         debug.GCStats
-	highLatencyCount    int
-	lastHighLatencyTime time.Time
-)
-
-var (
-	captureFPSCounter = fps.NewCounter(time.Second)
-	opencvFPSCounter  = fps.NewCounter(time.Second)
-	yoloFPSCounter    = fps.NewCounter(time.Second)
-
-	captureFps  float64
-	captureFt   time.Duration
-	captureCost time.Duration
-	opencvFps   float64
-	opencvFt    time.Duration
-	opencvCost  time.Duration
-	yoloFps     float64
-	yoloFt      time.Duration
-	yoloCost    time.Duration
-
-	personRGBA *image.RGBA
-	matchMat   gocv.Mat
-	frameMu    sync.RWMutex
-
-	captureTrigger = make(chan captureReq, 2)
-	captureFrameId uint64
-	lastTag        moduleTag
-	lastCapture    time.Time
-)
-
-var (
-	inIdle               = false
-	narrowing            = false
-	currentWeaponIndex   = WEAPON_INDEX_NONE
-	currentWeaponDisplay string
-	weaponIndexSignal    = make(chan int, 1)
-	r6sEngine            *Engine
-	yoloEngine           *yolo.Engine
+	cpu         float64
+	forceUpdate bool
 )
 
 var _ = debuggingWaitForInput()
@@ -170,36 +116,100 @@ func init() {
 
 	var err error
 
-	if !*nogui {
-		if windowTitle == "" {
-			log.Panic().
-				Msg("failed to initialize window name")
-		}
-		window.Option(
-			app.Title(windowTitle),
-			app.MinSize(1280, 720),
-			app.Size(1280, 720),
-		)
-	}
-
 	err = windows.SetPriorityClass(windows.CurrentProcess(), windows.HIGH_PRIORITY_CLASS)
 	if err != nil {
-		log.Warn().
-			Err(err).
-			Msg("failed to set process priority")
+		log.Warn().Err(err).Msg("failed to set process priority")
 	}
 
 	processSelf, err = process.NewProcess(int32(processId))
 	if err != nil {
-		log.Panic().
-			Err(err).
-			Msg("failed to get process")
+		log.Panic().Err(err).Msg("failed to get process")
 	}
 
 	selectDisplay()
-	initScreenBuffers()
 
 	loadTemplates()
+}
+
+func selectDisplay() {
+	displayIndex, err := selectDisplayInteractive()
+	if err != nil {
+		log.Panic().Err(err).Msg("failed to select display")
+	}
+
+	duplicator, err := capturer.New(displayIndex)
+	if err != nil {
+		log.Panic().Err(err).Msg("failed to create capturer")
+	}
+
+	bounds := duplicator.Bounds()
+	log.Info().
+		Int("displayIndex", displayIndex).
+		Int("width", bounds.Dx()).
+		Int("height", bounds.Dy()).
+		Msg("using display")
+
+	roiRect = image.Rectangle{roiRectPos, roiRectPos.Add(roiRectSize)}
+
+	ui.InitTheme()
+
+	capSrv = capturer.NewServer(duplicator, MATCHING_MODE, func() {
+		if win != nil && !*nogui {
+			win.App().Invalidate()
+		}
+	})
+}
+
+func selectDisplayInteractive() (int, error) {
+	numDisplays := screenshot.NumActiveDisplays()
+	log.Info().Int("activeDisplays", numDisplays).Msg("active displays detected")
+
+	displayBounds := make([]image.Rectangle, numDisplays)
+	for i := range numDisplays {
+		displayBounds[i] = screenshot.GetDisplayBounds(i)
+	}
+
+	if numDisplays <= 1 {
+		return 0, nil
+	}
+
+	log.Info().Msg("multi displays detected")
+	for i := range numDisplays {
+		size := displayBounds[i].Size()
+		fmt.Fprintf(os.Stdout, "[%d] %dx%d (X:%d, Y:%d)\n", i, size.X, size.Y, displayBounds[i].Min.X, displayBounds[i].Min.Y)
+	}
+
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		fmt.Fprintf(os.Stdout, "input index in range [0,%d]: ", numDisplays-1)
+		input, err := reader.ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return 0, fmt.Errorf("failed to read os.Stdin: %w", err)
+		}
+
+		input = strings.TrimSpace(input)
+		if input != "" {
+			index, err := strconv.Atoi(input)
+			if err != nil || index < 0 || index >= numDisplays {
+				log.Warn().Str("input", input).Int("min", 0).Int("max", numDisplays-1).Msg("invalid display index input")
+				continue
+			}
+			return index, nil
+		}
+
+		maxRes := 0
+		best := 0
+		for i := range numDisplays {
+			size := displayBounds[i].Size()
+			res := size.X * size.Y
+			if res > maxRes {
+				maxRes = res
+				best = i
+			}
+		}
+		log.Info().Int("displayIndex", best).Msg("auto selected display")
+		return best, nil
+	}
 }
 
 func loadTemplates() {
@@ -211,16 +221,7 @@ func loadTemplates() {
 		panicIf(weapons.Close())
 	}
 	panicIf(weapons.ReadFrom(TEMPLATES_DIRECTORY, 1, TEMPLATES_SUFFIX, TEMPLATES_PREFIX_IGNORE, CREATE_MASK, MATCHING_MODE))
-	log.Info().
-		Int("templates", len(weapons)).
-		Dur("cost", time.Since(tStart)).
-		Msg("templates loaded")
-}
-
-func initScreenBuffers() {
-	bounds := capturer.Bounds()
-	personRGBA = image.NewRGBA(bounds)
-	matchMat = gocv.NewMat()
+	log.Info().Int("templates", len(weapons)).Dur("cost", time.Since(tStart)).Msg("templates loaded")
 }
 
 func main() {
@@ -228,28 +229,19 @@ func main() {
 		weaponsMu.Lock()
 		defer weaponsMu.Unlock()
 
-		var err error
-		err = capturer.Close()
-		if err != nil {
-			log.Error().
-				Err(err).
-				Msg("failed to close capturer")
+		if capSrv != nil {
+			capSrv.Close()
 		}
-		err = weapons.Close()
-		if err != nil {
-			log.Error().
-				Err(err).
-				Msg("failed to close weapons")
-		}
-		if yoloEngine != nil {
-			yoloEngine.Close()
+		weapons.Close()
+		if detEng != nil {
+			detEng.Close()
 		}
 	}()
 
 	if !*noyolo {
-		yoloEngine = initPersonEngine()
+		detEng = initDetector()
 	}
-	if yoloEngine == nil {
+	if detEng == nil {
 		log.Warn().Msg("person detection disabled")
 	}
 
@@ -263,114 +255,79 @@ func main() {
 		})
 	}
 
-	cwg.Go(func(ctx context.Context) {
-		cpuMeasureLoop(ctx)
+	matcherEng = matcher.New(matcher.Config{
+		CapSrv:    capSrv,
+		ROIRect:   roiRect,
+		Weapons:   weapons,
+		WeaponsMu: &weaponsMu,
+		Debugging: debugging,
 	})
-	cwg.Go(func(ctx context.Context) {
-		tmplWatchLoop(ctx)
-	})
-	cwg.Go(func(ctx context.Context) {
-		r6sLoop(ctx)
-	})
-	cwg.Go(func(ctx context.Context) {
-		screenCaptureLoop(ctx)
-	})
-	cwg.Go(func(ctx context.Context) {
-		tmplMatchLoop(ctx)
-	})
-	if yoloEngine != nil {
+
+	clicker := engine.NewClicker(cwg.Ctx)
+	eng = engine.New(clicker, engine.Config{Debugging: debugging})
+
+	if !*nogui {
+		win = ui.NewWindow(ui.Config{
+			Title:   windowTitle,
+			MinSize: image.Pt(1280, 720),
+			Size:    image.Pt(1280, 720),
+		})
+		win.SetShortcuts(createShortcuts(win.App()))
+		win.Register(&metricsDrawer{
+			inputting:      &inputting,
+			inputMainOrAlt: &inputMainOrAlt,
+			inputBuf:       &inputBuf,
+		})
+		win.Register(matcherEng)
+		win.Register(eng)
+		if detEng != nil {
+			win.Register(detEng)
+		}
+		win.SetBounds(capSrv.Bounds().Max)
+	}
+
+	cwg.Go(capSrv.Run)
+	cwg.Go(matcherEng.Run)
+
+	if detEng != nil {
 		cwg.Go(func(ctx context.Context) {
-			personDetLoop(ctx)
+			detEng.Run(ctx, capSrv)
 		})
 	}
+
+	cwg.Go(r6sLoop)
+	cwg.Go(cpuMeasureLoop)
+	cwg.Go(tmplWatchLoop)
+
 	if !*nogui {
 		cwg.Go(func(ctx context.Context) {
-			windowLoop(ctx)
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+				win.SetScreenImage(capSrv.ReadScreen())
+				time.Sleep(time.Second / 60)
+			}
 		})
 		cwg.Go(func(ctx context.Context) {
-			<-ctx.Done()
-			window.Invalidate()
+			win.Run(ctx)
+			*nogui = true
 		})
 	}
 
 	cwg.Wait()
 }
 
-func screenCaptureLoop(ctx context.Context) {
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-
-	rawRGBA := image.NewRGBA(capturer.Bounds())
-	rawMat := gocv.NewMat()
-	defer rawMat.Close()
-
-	for {
-		var req captureReq
-		select {
-		case <-ctx.Done():
-			return
-		case req = <-captureTrigger:
-		}
-
-		if req.tag != lastTag && time.Since(lastCapture) < req.interval {
-			continue
-		}
-
-		tStart := time.Now()
-
-		err := capturer.GetImage(rawRGBA)
-		if err == outputduplication.ErrNoImageYet {
-			continue
-		}
-		panicIf(err)
-
-		frameMu.Lock()
-		copy(personRGBA.Pix, rawRGBA.Pix)
-		imageToMat(rawRGBA, &matchMat)
-		copy(screenImage.Pix, rawRGBA.Pix)
-		captureFrameId++
-		frameMu.Unlock()
-
-		lastTag = req.tag
-		lastCapture = time.Now()
-		captureCost = time.Since(tStart)
-		captureFps, captureFt = captureFPSCounter.Count()
-
-		if !*nogui {
-			window.Invalidate()
-		}
-	}
-}
-
-var cpu float64
-
-func cpuMeasureLoop(ctx context.Context) {
-	const interval = time.Second
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			cpu, _ = processSelf.PercentWithContext(ctx, interval)
-		}
-	}
-}
-
-var forceUpdate = false
-
 func r6sLoop(ctx context.Context) {
 	// the actual duration is exactly a second,
 	// more for template matching loop delay
-	const debounceInterval = time.Millisecond * 1500
+	const debounceInterval = 1500 * time.Millisecond
 
-	lastIndex := WEAPON_INDEX_NONE
+	lastIndex := matcher.WEAPON_INDEX_NONE
 	var toNoneDebounce bool
 	var lastSwitchToNone time.Time
-
-	engine := newEngine(newClicker(ctx))
-	r6sEngine = engine
-	defer engine.Close()
 
 	applyWeapon := func(newIndex int) {
 		weaponsMu.RLock()
@@ -400,7 +357,7 @@ func r6sLoop(ctx context.Context) {
 		}
 
 		// no debounce when debugging
-		if !debugging && lastIndex >= 0 && newIndex == WEAPON_INDEX_NONE {
+		if !debugging && lastIndex >= 0 && newIndex == matcher.WEAPON_INDEX_NONE {
 			// from notnone to none
 			if !toNoneDebounce {
 				// going to none, enter debounce
@@ -420,9 +377,7 @@ func r6sLoop(ctx context.Context) {
 		}
 
 		lastIndex = newIndex
-		currentWeaponIndex = newIndex
-		currentWeaponDisplay = to.DisplaySpeed(debugging)
-		engine.SetWeapon(to)
+		eng.SetWeapon(to)
 	}
 
 	ticker := time.NewTicker(time.Second / 125)
@@ -432,59 +387,22 @@ func r6sLoop(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case newIndex := <-weaponIndexSignal:
-			// using closure for mutex control
+		case newIndex := <-matcherEng.ResultCh():
 			applyWeapon(newIndex)
 		case <-ticker.C:
-			engine.Tick()
+			eng.Tick()
 		}
 	}
 }
 
-func windowLoop(ctx context.Context) {
-	var ops op.Ops
+func cpuMeasureLoop(ctx context.Context) {
+	const interval = time.Second
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
-		}
-
-		switch e := window.Event().(type) {
-		case app.DestroyEvent:
-			*nogui = true
-			if e.Err != nil {
-				log.Error().Err(e.Err).Msg("window error")
-			} else {
-				log.Debug().Msg("window closed normally")
-			}
-			return
-
-		case app.FrameEvent:
-			gtx := app.NewContext(&ops, e)
-			dScale = gtx.Metric
-
-			err := shortcuts.Match(gtx)
-			if err != nil {
-				log.Warn().Err(err).Msg("shortcuts match error")
-			}
-
-			if screenImage != nil {
-				layoutDisplay(gtx, screenImage)
-			}
-			if drawEnabled {
-				layoutMetrics(gtx)
-			}
-
-			e.Frame(gtx.Ops)
-
-		case app.ConfigEvent:
-		// case app.wakeupEvent:
-		default:
-			log.Trace().
-				Str("eventType", fmt.Sprintf("%T", e)).
-				Any("event", e).
-				Msg("window event")
+			cpu, _ = processSelf.PercentWithContext(ctx, interval)
 		}
 	}
 }
@@ -505,7 +423,6 @@ func tmplWatchLoop(ctx context.Context) {
 	defer watcher.Close()
 	panicIf(watcher.Add(TEMPLATES_DIRECTORY))
 
-	// wrap mutex with closures
 	muDelWeapon := func(event fsnotify.Event) (int, error) {
 		weaponsMu.Lock()
 		defer weaponsMu.Unlock()
@@ -521,7 +438,7 @@ func tmplWatchLoop(ctx context.Context) {
 		weaponsMu.Lock()
 		defer weaponsMu.Unlock()
 
-		time.Sleep(time.Millisecond * 100) // simply wait for the end of writing
+		time.Sleep(time.Millisecond * 100)
 		err := weapons.Append(name, CREATE_MASK, MATCHING_MODE)
 		if err != nil {
 			return fmt.Errorf("failed to add new weapon %q: %w", name, err)
@@ -541,29 +458,21 @@ func tmplWatchLoop(ctx context.Context) {
 		origName, _, err := w.ParseFileName(from)
 		if err == nil {
 			origI = weapons.IndexByName(origName)
-			// } else {
-			// 	ignore
 		}
 
 		if origI < 0 {
-			// load the new one
 			err := weapons.Append(to, CREATE_MASK, MATCHING_MODE)
 			if err != nil {
 				return fmt.Errorf("failed to add new weapon %q: %w", to, err)
 			}
-
 		} else {
-			// modify
-
 			if strings.HasPrefix(filepath.Base(to), TEMPLATES_PREFIX_IGNORE) {
-				// delete
 				err := weapons.Delete(origI)
 				if err != nil {
 					return fmt.Errorf("failed to delete %q: %w", origName, err)
 				}
 				return nil
 			}
-
 			return weapons[origI].DecodeFrom(to, CREATE_MASK, MATCHING_MODE)
 		}
 
@@ -580,33 +489,16 @@ func tmplWatchLoop(ctx context.Context) {
 				return
 			}
 
-			log.Debug().
-				Any("event", event).
-				Msg("fs event")
+			log.Debug().Any("event", event).Msg("fs event")
 
-			/*
-				[14:13:57.771]CREATE        "templates\\config.ini"
-				[14:13:57.771]WRITE         "templates\\config.ini"
-				[14:13:57.771]WRITE         "templates\\config.ini"
-
-				[14:14:44.191]RENAME        "templates\\config.ini"
-				[14:14:44.191]CREATE        "templates\\config__.ini" ← "templates\\config.ini"
-
-				[14:16:47.031]REMOVE        "templates\\config__.ini"
-			*/
 			switch event.Op {
-			// case fsnotify.Rename:
-			// handled in next fsCreate signal
-
 			case fsnotify.Create:
 				var err error
 				renameFrom := (*myFsEvent)(unsafe.Pointer(&event)).renamedFrom
 
 				if renameFrom == "" {
-					// is fsCreate
 					err = muAddWeapon(event.Name)
 				} else {
-					// is fsRename
 					err = muModWeapon(renameFrom, event.Name)
 				}
 				if err != nil {
@@ -615,14 +507,9 @@ func tmplWatchLoop(ctx context.Context) {
 				}
 
 				if renameFrom == "" {
-					log.Info().
-						Str("path", event.Name).
-						Msg("weapon added successfully")
+					log.Info().Str("path", event.Name).Msg("weapon added successfully")
 				} else {
-					log.Info().
-						Str("path", event.Name).
-						Str("renameFrom", renameFrom).
-						Msg("weapon modified successfully")
+					log.Info().Str("path", event.Name).Str("renameFrom", renameFrom).Msg("weapon modified successfully")
 				}
 
 			case fsnotify.Remove:
@@ -634,20 +521,12 @@ func tmplWatchLoop(ctx context.Context) {
 
 				switch deleted {
 				case 1:
-					log.Info().
-						Str("path", event.Name).
-						Msg("weapon deleted successfully")
+					log.Info().Str("path", event.Name).Msg("weapon deleted successfully")
 				case 0:
-					log.Warn().
-						Str("path", event.Name).
-						Msg("weapon failed to delete")
+					log.Warn().Str("path", event.Name).Msg("weapon failed to delete")
 				default:
-					log.Warn().
-						Str("path", event.Name).
-						Int("deleted", deleted).
-						Msg("weapon triggered multiple deletions")
+					log.Warn().Str("path", event.Name).Int("deleted", deleted).Msg("weapon triggered multiple deletions")
 				}
-
 			}
 
 		case err, ok := <-watcher.Errors:
@@ -655,240 +534,414 @@ func tmplWatchLoop(ctx context.Context) {
 				return
 			}
 			log.Error().Err(err).Msg("fsnotify error")
-
 		}
 	}
 }
 
-func tmplMatchLoop(ctx context.Context) {
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-
-	capture := gocv.NewMat()
-	defer capture.Close()
-
-	const (
-		interval         = time.Second / 5
-		intervalIdle     = time.Second / 2
-		dropIdleDuration = time.Second * 5
-	)
-
-	tickerNormal := time.NewTicker(interval)
-	defer tickerNormal.Stop()
-	tickerIdle := time.NewTicker(intervalIdle)
-	defer tickerIdle.Stop()
-	ticker := make(chan time.Time, 2)
-	defer close(ticker)
-
-	lastFoundTime := time.Now()
-	narrowing = false
-	lastSlot := w.Slot(w.SLOT_UNDEFINED)
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-
-		case t, ok := <-tickerNormal.C:
-			if !ok {
-				return
-			}
-			if inIdle {
-				continue
-			}
-			select {
-			case ticker <- t:
-			default:
-			}
-		case t, ok := <-tickerIdle.C:
-			if !ok {
-				return
-			}
-			if !inIdle {
-				continue
-			}
-			select {
-			case ticker <- t:
-			default:
-			}
-
-		case _, ok := <-ticker:
-			if !ok {
-				return
-			}
-
-			req := captureReq{tagOpenCV, interval}
-			if inIdle {
-				req.interval = intervalIdle
-			}
-			select {
-			case captureTrigger <- req:
-			default:
-			}
-
-			debug.ReadGCStats(&lastGCStats)
-
-			frameMu.RLock()
-			if captureFrameId == 0 {
-				frameMu.RUnlock()
-				continue
-			}
-			matchMat.CopyTo(&capture)
-			frameMu.RUnlock()
-
-			if !roiRect.In(capturer.Bounds()) {
-				log.Error().
-					Any("roiRect", roiRect).
-					Any("screenBounds", capturer.Bounds()).
-					Msg("roiRect is not fully contained in screen bounds")
-				continue
-			}
-			// template match
-			captureRoi := capture.Region(roiRect)
-			tStart := time.Now()
-			slotFilter := w.Slot(w.SLOT_UNDEFINED)
-			if narrowing {
-				slotFilter = lastSlot.Opposite()
-			}
-			weaponIndex, weaponsMatched, weaponFound = doMatchWeapon(captureRoi, slotFilter)
-			opencvCost = time.Since(tStart)
-			captureRoi.Close()
-
-			opencvFps, opencvFt = opencvFPSCounter.Count()
-
-			// output
-			if weaponFound {
-				// exit idle
-				lastFoundTime = time.Now()
-				inIdle = false
-				lastSlot = weapons[weaponIndex].Class.Detail().Slot
-				if lastSlot != w.SLOT_UNDEFINED && !lastSlot.Is(w.SLOT_MIX) {
-					narrowing = true
-				} else {
-					narrowing = false
-				}
-				weaponIndexSignal <- weaponIndex
-			} else {
-				// failed for a period of time,
-				// reduce performance consumption in idle state
-				// no idle when debugging
-				if time.Since(lastFoundTime) > dropIdleDuration && !debugging {
-					inIdle = true
-					narrowing = false
-					lastSlot = w.SLOT_UNDEFINED
-				}
-				weaponIndexSignal <- WEAPON_INDEX_NONE
-			}
-		}
-	}
-}
-
-var lastSuccessfulTempl int
-
-func doMatchWeapon(image gocv.Mat, slotFilter w.Slot) (templateIndex, templateMatched int, found bool) {
-	weaponsMu.RLock()
-	defer weaponsMu.RUnlock()
-
-	const method = gocv.TmCcoeffNormed
-
-	for j := range weapons {
-		i := j + lastSuccessfulTempl // 从上次成功的模板开始往下匹配
-		i %= len(weapons)
-		templateIndex = i
-
-		tmpl := weapons[i]
-
-		if slotFilter != w.SLOT_UNDEFINED && j != 0 && !tmpl.Class.Detail().Slot.Has(slotFilter) {
-			continue
-		}
-
-		panicIf(tmpl.Template.Match(image, method))
-
-		templateMatched++
-
-		if tmpl.Template.MaxVal >= MATCH_THRESHOLD {
-			lastSuccessfulTempl = i
-			found = true
-			break // 跳过剩余匹配
-		}
-	}
-
-	return
-}
-
-func initPersonEngine() *yolo.Engine {
-	cfg := yolo.DefaultConfig()
-	cfg.ModelPath = `B:\Git\go-vision\_weights\yolo26_weights\yolo26n.onnx`
-	cfg.OnnxLibPath = `B:\Git\GoCVStreamer\libs\onnxruntime-win-x64-gpu_cuda13-1.28.0\lib\onnxruntime.dll`
-	cfg.UseTensorRT = true
-	cfg.TensorRTPluginPath = `B:\Lib\TensorRT-RTX-EP-ABI-v0.3.0-cu13\onnxruntime_providers_nv_tensorrt_rtx.dll`
+func initDetector() *detector.Engine {
+	cfg := detector.DefaultConfig()
 
 	pLog := logger.New("Person")
 	pLog.Debug().
 		Str("modelPath", cfg.ModelPath).
 		Str("onnxLibPath", cfg.OnnxLibPath).
-		Int("inputSize", cfg.InputSize).
 		Float32("confThresh", cfg.ConfThresh).
+		Int("inputSize", cfg.InputSize).
 		Bool("useCuda", cfg.UseCuda).
+		Bool("useTensorRT", cfg.UseTensorRT).
+		Str("tensorRTPluginPath", cfg.TensorRTPluginPath).
 		Msg("initializing person engine")
 
-	engine, err := yolo.New(cfg, pLog)
+	engine, err := detector.New(cfg, pLog)
 	if err != nil {
-		pLog.Error().
-			Err(err).
-			Msg("failed to init person engine")
+		pLog.Error().Err(err).Msg("failed to init person engine")
 		return nil
 	}
 
-	pLog.Info().
-		Msg("person engine initialized")
+	pLog.Info().Msg("person engine initialized")
 	return engine
 }
 
-func personDetLoop(ctx context.Context) {
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
+var (
+	showPosTill      time.Time
+	inputting        bool
+	inputMainOrAlt   bool
+	inputBuf         bytes.Buffer
+	weaponNameLongest int
+	onceWeaponNameLongest sync.Once
+)
 
-	const interval = time.Second / 15
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+type metricsDrawer struct {
+	inputting      *bool
+	inputMainOrAlt *bool
+	inputBuf       *bytes.Buffer
+}
 
-	localImg := image.NewRGBA(capturer.Bounds())
-	lastFrameId := captureFrameId
+func (d *metricsDrawer) Draw(gtx layout.Context, s ui.DScale) {
+	var gc debug.GCStats
+	debug.ReadGCStats(&gc)
 
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
+	var sb strings.Builder
 
-		select {
-		case captureTrigger <- captureReq{tagYOLO, interval}:
-		default:
-		}
+	cap := capSrv.Stats()
+	mat := matcherEng.Stats()
+	var det detector.Stats
 
-		frameMu.RLock()
-		id := captureFrameId
-		if id == lastFrameId {
-			frameMu.RUnlock()
-			continue
-		}
-		lastFrameId = id
-		copy(localImg.Pix, personRGBA.Pix)
-		frameMu.RUnlock()
+	fmt.Fprintf(&sb, "| Capture: %.0ffps(%.1fms)", cap.FPS, cap.CostMs())
 
-		tStart := time.Now()
-		err := yoloEngine.Detect(localImg)
-		if err != nil {
-			log.Warn().
-				Err(err).
-				Msg("person detection failed")
-			continue
-		}
-		yoloCost = time.Since(tStart)
+	fmt.Fprintf(&sb, " | OpenCV: %.0ffps(%.1fms)", mat.FPS, mat.CostMs)
 
-		yoloFps, yoloFt = yoloFPSCounter.Count()
-		_, _, _ = yoloEngine.Snapshot()
+	if detEng != nil {
+		det = detEng.Stats()
+		fmt.Fprintf(&sb, " | YOLO: %.0ffps/%d(%.1fms)", det.FPS, det.Count, det.CostMs)
 	}
+
+	fmt.Fprintf(&sb, " | 0x%04X |", cap.FrameCount)
+	if debugging {
+		sb.WriteString(" DEBUG |")
+	}
+	sb.WriteByte('\n')
+
+	const us = float64(time.Microsecond)
+	fmt.Fprintf(&sb, "| CPU: %04.1f%% | GC: %d", cpu, gc.NumGC)
+	if gc.NumGC > 0 {
+		avgUs := float64(gc.PauseTotal) / float64(gc.NumGC) / us
+		sinceS := time.Since(gc.LastGC).Seconds()
+		fmt.Fprintf(&sb, "(avg: %.2fus, last: %.2fs)", avgUs, sinceS)
+	}
+	fmt.Fprintf(&sb, " | 匹配: %.1fms/%d=%.2fms |\n\n",
+		mat.CostMs, mat.Matched, safeDiv(mat.CostMs, float64(mat.Matched)))
+
+	if *d.inputting {
+		if !*d.inputMainOrAlt {
+			sb.WriteString("|M|: ")
+		} else {
+			sb.WriteString("|A|: ")
+		}
+		sb.Write(d.inputBuf.Bytes())
+		sb.WriteByte('\n')
+	}
+
+	if eng != nil {
+		weap := eng.Weapon()
+		if weap != nil {
+			sb.WriteString(weap.DisplaySpeed(debugging))
+			sb.WriteByte('\n')
+		}
+	}
+
+	ui.DrawList(gtx, strings.Split(strings.TrimSpace(sb.String()), "\n"))
+}
+
+func safeDiv(a, b float64) float64 {
+	if b == 0 {
+		return 0
+	}
+	return a / b
+}
+
+func createShortcuts(receiver any) widgets.Shortcuts {
+	if *nogui || receiver == nil {
+		return widgets.Shortcuts{}
+	}
+
+	return widgets.NewShortcuts(receiver,
+		widgets.NewShortcut(key.NameEscape).
+			Do(func(_ key.Name, _ key.Modifiers) {
+				*nogui = true
+				wndTitle, _ := syscall.UTF16PtrFromString(windowTitle)
+				hwnd := user32FindWindow(0, wndTitle)
+				if hwnd != 0 {
+					user32PostMessage(hwnd, 0x0010, 0, 0)
+				}
+			}),
+
+		widgets.NewShortcut(key.NameSpace).
+			Do(func(_ key.Name, _ key.Modifiers) {
+				listWeapons()
+			}),
+
+		widgets.NewShortcut("W", "w").
+			Do(func(_ key.Name, mod key.Modifiers) {
+				if mod.Contain(key.ModCtrl | key.ModShift) {
+					loadTemplates()
+				}
+			}),
+
+		widgets.NewShortcut("P", "p").
+			Do(func(_ key.Name, _ key.Modifiers) {
+				windowHandel = windows.GetForegroundWindow()
+				log.Info().
+					Int("parentProcessId", parentProcessId).
+					Int("processId", processId).
+					Uint64("windowHandel", uint64(windowHandel)).
+					Msg("process/window info")
+			}),
+
+		widgets.NewShortcut("F", "f").
+			Do(func(_ key.Name, _ key.Modifiers) {
+				capSrv.ResetFramesElapsed()
+				log.Info().Msg("capturer.FramesElapsed reset")
+			}),
+
+		widgets.NewShortcut("D", "d").
+			Do(func(_ key.Name, _ key.Modifiers) {
+				if win != nil {
+					win.SetDrawEnabled(!win.DrawEnabled())
+				}
+			}),
+
+		widgets.NewShortcut("B", "b").
+			Do(func(_ key.Name, _ key.Modifiers) {
+				debugging = !debugging
+				forceUpdate = true
+				log.Info().Bool("debugging", debugging).Msg("debugging toggled")
+			}),
+
+		widgets.NewShortcut("R", "r",
+			key.NameUpArrow, key.NameDownArrow,
+			key.NameLeftArrow, key.NameRightArrow).
+			Do(func(n key.Name, mod key.Modifiers) {
+				moveROI(n, mod)
+			}),
+
+		widgets.NewShortcut("T", "t").
+			Do(func(_ key.Name, mod key.Modifiers) {
+				toggleWDA(mod)
+			}),
+
+		widgets.NewShortcut("I", "i",
+			"0", "1", "2", "3", "4",
+			"5", "6", "7", "8", "9",
+			".", "-", key.NameReturn,
+			key.NameDeleteBackward).
+			Do(func(k key.Name, m key.Modifiers) {
+				handleInput(k, m)
+			}),
+	)
+}
+
+func moveROI(name key.Name, mod key.Modifiers) {
+	boundaryCheck := func(constraints image.Rectangle, rect *image.Rectangle) {
+		boundaryCheckPos := func(constraints image.Rectangle, pos *image.Point) {
+			pos.X = max(pos.X, constraints.Min.X)
+			pos.Y = max(pos.Y, constraints.Min.Y)
+			pos.X = min(pos.X, constraints.Max.X)
+			pos.Y = min(pos.Y, constraints.Max.Y)
+		}
+		size := rect.Size()
+		boundaryCheckPos(constraints, &rect.Max)
+		rect.Min = rect.Max.Sub(size)
+		boundaryCheckPos(constraints, &rect.Min)
+		rect.Max = rect.Min.Add(size)
+	}
+
+	offset := 1
+	for range bits.OnesCount32(uint32(mod)) {
+		offset *= 4
+	}
+
+	var newRect image.Rectangle
+	switch name {
+	case "R", "r":
+		newRect = image.Rectangle{roiRectPos, roiRectPos.Add(roiRectSize)}
+	case key.NameUpArrow:
+		newRect = roiRect.Sub(image.Pt(0, offset))
+	case key.NameDownArrow:
+		newRect = roiRect.Add(image.Pt(0, offset))
+	case key.NameLeftArrow:
+		newRect = roiRect.Sub(image.Pt(offset, 0))
+	case key.NameRightArrow:
+		newRect = roiRect.Add(image.Pt(offset, 0))
+	}
+
+	boundaryCheck(capSrv.Bounds(), &newRect)
+	roiRect = newRect
+	matcherEng.SetROI(newRect)
+	showPosTill = time.Now().Add(time.Second * 3)
+	log.Debug().Any("roiRect", roiRect).Msg("roiRect moved")
+}
+
+func toggleWDA(mod key.Modifiers) {
+	if windowHandel == 0 {
+		windowHandel = windows.GetForegroundWindow()
+	}
+
+	currWda, err := GetWindowDisplayAffinity(windowHandel)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to GetWindowDisplayAffinity")
+		return
+	}
+
+	switch currWda {
+	case WDA_NONE:
+		var toWda uint32
+		if !mod.Contain(key.ModShift) {
+			toWda = WDA_EXCLUDEFROMCAPTURE
+			log.Info().Msg("wda set to WDA_EXCLUDEFROMCAPTURE")
+		} else {
+			toWda = WDA_MONITOR
+			log.Info().Msg("wda set to WDA_MONITOR")
+		}
+		err = SetWindowDisplayAffinity(windowHandel, toWda)
+	case WDA_EXCLUDEFROMCAPTURE:
+		log.Info().Msg("wda set to WDA_NONE")
+		err = SetWindowDisplayAffinity(windowHandel, WDA_NONE)
+	}
+
+	if err != nil {
+		log.Error().Err(err).Msg("failed to SetWindowDisplayAffinity")
+	}
+}
+
+func handleInput(k key.Name, m key.Modifiers) {
+	switch k {
+	case "I", "i":
+		if !debugging {
+			log.Warn().Msg("not in debugging")
+			return
+		}
+		inputting = true
+		inputMainOrAlt = m.Contain(key.ModShift)
+		return
+
+	case key.NameDeleteBackward:
+		if inputBuf.Len() == 0 {
+			return
+		}
+		inputBuf.Truncate(inputBuf.Len() - 1)
+
+	case key.NameReturn:
+		if !inputting {
+			return
+		}
+		inputting = false
+		if inputBuf.Len() == 0 {
+			log.Warn().Msg("empty input")
+			return
+		}
+		modWeapon(inputMainOrAlt, inputBuf.String())
+		inputBuf.Reset()
+
+	case "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ".", "-":
+		if inputting {
+			inputBuf.WriteString(string(k))
+		}
+		return
+	}
+}
+
+func modWeapon(mainOrAlt bool, newSpeed string) {
+	idx := matcherEng.WeaponIndex()
+	if idx == matcher.WEAPON_INDEX_NONE {
+		log.Warn().Msg("weapon unselected")
+		return
+	}
+
+	switch newSpeed {
+	case "-":
+		// 切换到none时的防抖
+		mainOrAlt = true
+		newSpeed = w.SPEED_SIGN_AUTO
+	case "--":
+		mainOrAlt = true
+		newSpeed = w.SPEED_SIGN_COPY
+	}
+
+	weaponsMu.RLock()
+	wps := matcherEng.Weapons()
+	orig := wps[idx]
+	weaponsMu.RUnlock()
+
+	dir := filepath.Dir(orig.Path)
+	origName := filepath.Base(orig.Path)
+	ext := filepath.Ext(origName)
+
+	var speedMain, speedAlt string
+	if !mainOrAlt {
+		speedMain = newSpeed
+		if orig.SpeedAltFrac != 0 {
+			speedAlt = fmt.Sprintf("%d.%d", orig.SpeedAltInt, orig.SpeedAltFrac)
+		} else {
+			speedAlt = fmt.Sprintf("%d", orig.SpeedAltInt)
+		}
+	} else {
+		if orig.SpeedMainFrac != 0 {
+			speedMain = fmt.Sprintf("%d.%d", orig.SpeedMainInt, orig.SpeedMainFrac)
+		} else {
+			speedMain = fmt.Sprintf("%d", orig.SpeedMainInt)
+		}
+		speedAlt = newSpeed
+	}
+
+	newName := fmt.Sprintf("{%s_%s_%s} %s%s",
+		orig.Class.ToString(true),
+		speedMain, speedAlt,
+		orig.Name, ext,
+	)
+	newPath := filepath.Join(dir, newName)
+	err := os.Rename(orig.Path, newPath)
+	if err != nil {
+		log.Error().Err(err).
+			Str("from", orig.Path).
+			Str("to", newPath).
+			Msg("failed to rename weapon file")
+	} else {
+		log.Info().
+			Str("from", orig.Path).
+			Str("to", newPath).
+			Msg("renamed weapon file")
+	}
+
+	forceUpdate = true
+}
+
+func listWeapons() {
+	const indexLength = 3
+
+	weaponsMu.RLock()
+	wps := matcherEng.Weapons()
+	weaponsMu.RUnlock()
+
+	onceWeaponNameLongest.Do(func() {
+		for _, w := range wps {
+			weaponNameLongest = max(weaponNameLongest, len(w.Name))
+		}
+	})
+
+	skipped := 0
+	for i, w := range wps {
+		if w.SpeedMain == 0 {
+			skipped++
+			continue
+		}
+
+		speedMain, speedMainF, speedAlt, speedAltF := w.GetAllSpeeds(debugging)
+		fmt.Fprintf(os.Stdout,
+			"[%0*d] {%s_%02d.%d_%02d.%d} %-*s %.2f%%\n",
+			indexLength, i,
+			w.Class.ToString(true),
+			speedMain, speedMainF, speedAlt, speedAltF,
+			weaponNameLongest, w.Name,
+			w.Template.MaxVal*100,
+		)
+	}
+	if skipped > 0 {
+		log.Info().Int("skipped", skipped).Msg("skipped undefined weapon(s)")
+	}
+}
+
+var (
+	user32          = syscall.MustLoadDLL("user32.dll")
+	procFindWindow  = user32.MustFindProc("FindWindowW")
+	procPostMessage = user32.MustFindProc("PostMessageW")
+)
+
+func user32FindWindow(className uintptr, windowName *uint16) uintptr {
+	hwnd, _, _ := procFindWindow.Call(className, uintptr(unsafe.Pointer(windowName)))
+	return hwnd
+}
+
+func user32PostMessage(hwnd uintptr, msg uint32, wParam, lParam uintptr) {
+	procPostMessage.Call(hwnd, uintptr(msg), wParam, lParam)
 }
