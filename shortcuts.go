@@ -8,12 +8,29 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
+	"unsafe"
 
 	"gioui.org/io/key"
 	w "github.com/Miuzarte/GoCVStreamer/weapon"
 	"golang.org/x/sys/windows"
 )
+
+var (
+	user32          = syscall.MustLoadDLL("user32.dll")
+	procFindWindow  = user32.MustFindProc("FindWindowW")
+	procPostMessage = user32.MustFindProc("PostMessageW")
+)
+
+func shortcutQuitGui(key.Name, key.Modifiers) {
+	*nogui = true
+	wndTitle, _ := syscall.UTF16PtrFromString(windowTitle)
+	hwnd, _, _ := procFindWindow.Call(0, uintptr(unsafe.Pointer(wndTitle)))
+	if hwnd != 0 {
+		procPostMessage.Call(hwnd, 0x0010, 0, 0)
+	}
+}
 
 var (
 	onceWeaponNameLongest sync.Once
@@ -57,7 +74,6 @@ func shortcutListWeapons(key.Name, key.Modifiers) {
 	}
 }
 
-// Deprecated: there is a slight memory leak
 func shortcutReloadWeapons(_ key.Name, mod key.Modifiers) {
 	if mod.Contain(key.ModCtrl | key.ModShift) {
 		loadTemplates()

@@ -2,6 +2,12 @@
 	"folders": [
 		{
 			"path": "."
+		},
+		{
+			"path": "../go-vision"
+		},
+		{
+			"path": "../onnxruntime_purego"
 		}
 	],
 	"settings": {

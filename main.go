@@ -26,6 +26,7 @@ import (
 	"github.com/Miuzarte/GoCVStreamer/logger"
 	w "github.com/Miuzarte/GoCVStreamer/weapon"
 	ws "github.com/Miuzarte/GoCVStreamer/weapons"
+	"github.com/Miuzarte/GoCVStreamer/yolo"
 	"github.com/fsnotify/fsnotify"
 
 	"github.com/kirides/go-d3d/outputduplication"
@@ -45,6 +46,7 @@ var (
 	nogui    = flag.Bool("nogui", false, "run without GUI window")
 	httpPort = flag.String("port", ":8080", "HTTP metrics server port")
 	nohttp   = flag.Bool("nohttp", false, "disable HTTP metrics server")
+	noyolo   = flag.Bool("noyolo", false, "disable YOLO person detection")
 )
 
 var log = logger.New("Streamer")
@@ -60,13 +62,18 @@ const (
 	MATCHING_MODE gocv.IMReadFlag = gocv.IMReadGrayScale
 )
 
+type moduleTag int
+
 const (
-	SAMPLE_RATE                  = 5 // Hz
-	SAMPLE_INTERVAL              = time.Second / SAMPLE_RATE
-	SAMPLE_RATE_IDLE             = 2 // Hz
-	SAMPLE_INTERVAL_IDLE         = time.Second / SAMPLE_RATE_IDLE
-	SAMPLE_RATE_TO_IDLE_DURATION = time.Second * 5
+	_ moduleTag = iota
+	tagOpenCV
+	tagYOLO
 )
+
+type captureReq struct {
+	tag      moduleTag
+	interval time.Duration
+}
 
 var (
 	parentProcessId = os.Getppid()
@@ -100,15 +107,34 @@ const MATCH_THRESHOLD = 0.9
 
 var (
 	lastGCStats         debug.GCStats
-	captureCost         time.Duration
-	weaponsMatchingCost time.Duration
-	fpsCount            float64
-	fpsFrametime        time.Duration
 	highLatencyCount    int
 	lastHighLatencyTime time.Time
 )
 
-var fpsCounter = fps.NewCounter(SAMPLE_INTERVAL)
+var (
+	captureFPSCounter = fps.NewCounter(time.Second)
+	opencvFPSCounter  = fps.NewCounter(time.Second)
+	yoloFPSCounter    = fps.NewCounter(time.Second)
+
+	captureFps  float64
+	captureFt   time.Duration
+	captureCost time.Duration
+	opencvFps   float64
+	opencvFt    time.Duration
+	opencvCost  time.Duration
+	yoloFps     float64
+	yoloFt      time.Duration
+	yoloCost    time.Duration
+
+	personRGBA *image.RGBA
+	matchMat   gocv.Mat
+	frameMu    sync.RWMutex
+
+	captureTrigger = make(chan captureReq, 2)
+	captureFrameId uint64
+	lastTag        moduleTag
+	lastCapture    time.Time
+)
 
 var (
 	inIdle               = false
@@ -117,6 +143,7 @@ var (
 	currentWeaponDisplay string
 	weaponIndexSignal    = make(chan int, 1)
 	r6sEngine            *Engine
+	yoloEngine           *yolo.Engine
 )
 
 var _ = debuggingWaitForInput()
@@ -170,6 +197,7 @@ func init() {
 	}
 
 	selectDisplay()
+	initScreenBuffers()
 
 	loadTemplates()
 }
@@ -187,6 +215,12 @@ func loadTemplates() {
 		Int("templates", len(weapons)).
 		Dur("cost", time.Since(tStart)).
 		Msg("templates loaded")
+}
+
+func initScreenBuffers() {
+	bounds := capturer.Bounds()
+	personRGBA = image.NewRGBA(bounds)
+	matchMat = gocv.NewMat()
 }
 
 func main() {
@@ -207,7 +241,17 @@ func main() {
 				Err(err).
 				Msg("failed to close weapons")
 		}
+		if yoloEngine != nil {
+			yoloEngine.Close()
+		}
 	}()
+
+	if !*noyolo {
+		yoloEngine = initPersonEngine()
+	}
+	if yoloEngine == nil {
+		log.Warn().Msg("person detection disabled")
+	}
 
 	cwg := cwg.New(context.Background())
 	cwg.WithSignal(syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
@@ -223,17 +267,24 @@ func main() {
 		cpuMeasureLoop(ctx)
 	})
 	cwg.Go(func(ctx context.Context) {
+		tmplWatchLoop(ctx)
+	})
+	cwg.Go(func(ctx context.Context) {
 		r6sLoop(ctx)
 	})
 	cwg.Go(func(ctx context.Context) {
-		tmplWatchLoop(ctx)
+		screenCaptureLoop(ctx)
 	})
 	cwg.Go(func(ctx context.Context) {
 		tmplMatchLoop(ctx)
 	})
+	if yoloEngine != nil {
+		cwg.Go(func(ctx context.Context) {
+			personDetLoop(ctx)
+		})
+	}
 	if !*nogui {
 		cwg.Go(func(ctx context.Context) {
-			defer cwg.Cancel()
 			windowLoop(ctx)
 		})
 		cwg.Go(func(ctx context.Context) {
@@ -244,6 +295,54 @@ func main() {
 
 	cwg.Wait()
 }
+
+func screenCaptureLoop(ctx context.Context) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	rawRGBA := image.NewRGBA(capturer.Bounds())
+	rawMat := gocv.NewMat()
+	defer rawMat.Close()
+
+	for {
+		var req captureReq
+		select {
+		case <-ctx.Done():
+			return
+		case req = <-captureTrigger:
+		}
+
+		if req.tag != lastTag && time.Since(lastCapture) < req.interval {
+			continue
+		}
+
+		tStart := time.Now()
+
+		err := capturer.GetImage(rawRGBA)
+		if err == outputduplication.ErrNoImageYet {
+			continue
+		}
+		panicIf(err)
+
+		frameMu.Lock()
+		copy(personRGBA.Pix, rawRGBA.Pix)
+		imageToMat(rawRGBA, &matchMat)
+		copy(screenImage.Pix, rawRGBA.Pix)
+		captureFrameId++
+		frameMu.Unlock()
+
+		lastTag = req.tag
+		lastCapture = time.Now()
+		captureCost = time.Since(tStart)
+		captureFps, captureFt = captureFPSCounter.Count()
+
+		if !*nogui {
+			window.Invalidate()
+		}
+	}
+}
+
+var cpu float64
 
 func cpuMeasureLoop(ctx context.Context) {
 	const interval = time.Second
@@ -353,6 +452,7 @@ func windowLoop(ctx context.Context) {
 
 		switch e := window.Event().(type) {
 		case app.DestroyEvent:
+			*nogui = true
 			if e.Err != nil {
 				log.Error().Err(e.Err).Msg("window error")
 			} else {
@@ -567,9 +667,15 @@ func tmplMatchLoop(ctx context.Context) {
 	capture := gocv.NewMat()
 	defer capture.Close()
 
-	tickerNormal := time.NewTicker(SAMPLE_INTERVAL)
+	const (
+		interval         = time.Second / 5
+		intervalIdle     = time.Second / 2
+		dropIdleDuration = time.Second * 5
+	)
+
+	tickerNormal := time.NewTicker(interval)
 	defer tickerNormal.Stop()
-	tickerIdle := time.NewTicker(SAMPLE_INTERVAL_IDLE)
+	tickerIdle := time.NewTicker(intervalIdle)
 	defer tickerIdle.Stop()
 	ticker := make(chan time.Time, 2)
 	defer close(ticker)
@@ -611,16 +717,24 @@ func tmplMatchLoop(ctx context.Context) {
 				return
 			}
 
+			req := captureReq{tagOpenCV, interval}
+			if inIdle {
+				req.interval = intervalIdle
+			}
+			select {
+			case captureTrigger <- req:
+			default:
+			}
+
 			debug.ReadGCStats(&lastGCStats)
 
-			// screenshot
-			tStart := time.Now()
-			err := doScreenshot(screenImage, &capture)
-			captureCost = time.Since(tStart)
-			if err == outputduplication.ErrNoImageYet {
+			frameMu.RLock()
+			if captureFrameId == 0 {
+				frameMu.RUnlock()
 				continue
 			}
-			panicIf(err)
+			matchMat.CopyTo(&capture)
+			frameMu.RUnlock()
 
 			if !roiRect.In(capturer.Bounds()) {
 				log.Error().
@@ -631,16 +745,16 @@ func tmplMatchLoop(ctx context.Context) {
 			}
 			// template match
 			captureRoi := capture.Region(roiRect)
-			tStart = time.Now()
+			tStart := time.Now()
 			slotFilter := w.Slot(w.SLOT_UNDEFINED)
 			if narrowing {
 				slotFilter = lastSlot.Opposite()
 			}
 			weaponIndex, weaponsMatched, weaponFound = doMatchWeapon(captureRoi, slotFilter)
-			weaponsMatchingCost = time.Since(tStart)
+			opencvCost = time.Since(tStart)
 			captureRoi.Close()
 
-			fpsCount, fpsFrametime = fpsCounter.Count()
+			opencvFps, opencvFt = opencvFPSCounter.Count()
 
 			// output
 			if weaponFound {
@@ -658,16 +772,12 @@ func tmplMatchLoop(ctx context.Context) {
 				// failed for a period of time,
 				// reduce performance consumption in idle state
 				// no idle when debugging
-				if time.Since(lastFoundTime) > SAMPLE_RATE_TO_IDLE_DURATION && !debugging {
+				if time.Since(lastFoundTime) > dropIdleDuration && !debugging {
 					inIdle = true
 					narrowing = false
 					lastSlot = w.SLOT_UNDEFINED
 				}
 				weaponIndexSignal <- WEAPON_INDEX_NONE
-			}
-
-			if !*nogui {
-				window.Invalidate()
 			}
 		}
 	}
@@ -704,4 +814,81 @@ func doMatchWeapon(image gocv.Mat, slotFilter w.Slot) (templateIndex, templateMa
 	}
 
 	return
+}
+
+func initPersonEngine() *yolo.Engine {
+	cfg := yolo.DefaultConfig()
+	cfg.ModelPath = `B:\Git\go-vision\_weights\yolo26_weights\yolo26n.onnx`
+	cfg.OnnxLibPath = `B:\Git\GoCVStreamer\libs\onnxruntime-win-x64-gpu_cuda13-1.28.0\lib\onnxruntime.dll`
+	cfg.UseTensorRT = true
+	cfg.TensorRTPluginPath = `B:\Lib\TensorRT-RTX-EP-ABI-v0.3.0-cu13\onnxruntime_providers_nv_tensorrt_rtx.dll`
+
+	pLog := logger.New("Person")
+	pLog.Debug().
+		Str("modelPath", cfg.ModelPath).
+		Str("onnxLibPath", cfg.OnnxLibPath).
+		Int("inputSize", cfg.InputSize).
+		Float32("confThresh", cfg.ConfThresh).
+		Bool("useCuda", cfg.UseCuda).
+		Msg("initializing person engine")
+
+	engine, err := yolo.New(cfg, pLog)
+	if err != nil {
+		pLog.Error().
+			Err(err).
+			Msg("failed to init person engine")
+		return nil
+	}
+
+	pLog.Info().
+		Msg("person engine initialized")
+	return engine
+}
+
+func personDetLoop(ctx context.Context) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	const interval = time.Second / 15
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	localImg := image.NewRGBA(capturer.Bounds())
+	lastFrameId := captureFrameId
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		select {
+		case captureTrigger <- captureReq{tagYOLO, interval}:
+		default:
+		}
+
+		frameMu.RLock()
+		id := captureFrameId
+		if id == lastFrameId {
+			frameMu.RUnlock()
+			continue
+		}
+		lastFrameId = id
+		copy(localImg.Pix, personRGBA.Pix)
+		frameMu.RUnlock()
+
+		tStart := time.Now()
+		err := yoloEngine.Detect(localImg)
+		if err != nil {
+			log.Warn().
+				Err(err).
+				Msg("person detection failed")
+			continue
+		}
+		yoloCost = time.Since(tStart)
+
+		yoloFps, yoloFt = yoloFPSCounter.Count()
+		_, _, _ = yoloEngine.Snapshot()
+	}
 }

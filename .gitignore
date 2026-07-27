@@ -1,6 +1,9 @@
 # .vscode/
 
 opencv*/
+libs/
+
+nv_cache/
 
 templates*/
 
