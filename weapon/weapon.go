@@ -461,7 +461,7 @@ func (w *Weapon) DisplaySpeed(
 	}, debug bool,
 ) {
 	if w == nil {
-		sw.WriteString("No weapon")
+		sw.WriteString("\nNo weapon\n")
 		return
 	}
 

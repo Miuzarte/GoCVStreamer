@@ -8,6 +8,9 @@
 		},
 		{
 			"path": "../onnxruntime_purego"
+		},
+		{
+			"path": "../gotool"
 		}
 	],
 	"settings": {

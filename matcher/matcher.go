@@ -202,11 +202,11 @@ func (e *Engine) Run(ctx context.Context) {
 			}
 		}
 
-		reqInterval := interval
+		fps := e.cfg.Fps
 		if e.inIdle {
-			reqInterval = intervalIdle
+			fps = e.cfg.FpsIdle
 		}
-		e.capturerServer.Request(capturer.TagOpenCV, reqInterval)
+		e.capturerServer.RaiseCeiling(fps)
 
 		frameId := e.capturerServer.ReadFrameId()
 		if frameId == 0 {

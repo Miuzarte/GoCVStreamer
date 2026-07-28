@@ -4,10 +4,13 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"math"
 
+	"gioui.org/f32"
 	"gioui.org/font"
 	"gioui.org/layout"
 	"gioui.org/op"
+	"gioui.org/op/clip"
 	"gioui.org/op/paint"
 	"gioui.org/unit"
 
@@ -94,4 +97,27 @@ func DrawList(gtx layout.Context, lines []string) layout.Dimensions {
 
 func FormatPct(v float32) string {
 	return fmt.Sprintf("%.2f%%", v*100)
+}
+
+func DrawLine(gtx layout.Context, c color.NRGBA, from, to image.Point) layout.Dimensions {
+	defer op.Offset(from).Push(gtx.Ops).Pop()
+
+	dx := float64(to.X - from.X)
+	dy := float64(to.Y - from.Y)
+	length := float32(math.Sqrt(dx*dx + dy*dy))
+	if length < 1 {
+		return layout.Dimensions{}
+	}
+
+	angle := float32(math.Atan2(dy, dx))
+
+	defer op.Affine(f32.Affine2D{}.Rotate(f32.Pt(0, 0), angle)).Push(gtx.Ops).Pop()
+
+	halfT := BorderThickness / 2
+	defer clip.Rect{Min: image.Pt(0, -halfT), Max: image.Pt(int(length), halfT)}.Push(gtx.Ops).Pop()
+
+	paint.ColorOp{Color: c}.Add(gtx.Ops)
+	paint.PaintOp{}.Add(gtx.Ops)
+
+	return layout.Dimensions{}
 }

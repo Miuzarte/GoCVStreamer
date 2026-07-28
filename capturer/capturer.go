@@ -106,8 +106,18 @@ func (ss *DxgiDesktopDuplicator) GetImage(img *image.RGBA) error {
 	return ss.getImage(img)
 }
 
+func (ss *DxgiDesktopDuplicator) GetImageTimeout(img *image.RGBA, timeoutMs uint) error {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	return ss.getImageTimeout(img, timeoutMs)
+}
+
 func (ss *DxgiDesktopDuplicator) getImage(img *image.RGBA) error {
-	err := ss.ddup.GetImage(img, 0)
+	return ss.getImageTimeout(img, 0)
+}
+
+func (ss *DxgiDesktopDuplicator) getImageTimeout(img *image.RGBA, timeoutMs uint) error {
+	err := ss.ddup.GetImage(img, timeoutMs)
 	if err == nil {
 		ss.FramesElapsed++
 	} else {

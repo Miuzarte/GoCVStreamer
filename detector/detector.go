@@ -3,6 +3,7 @@ package detector
 import (
 	"context"
 	"image"
+	"image/draw"
 	"runtime"
 	"sync"
 	"time"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/Miuzarte/GoCVStreamer/capturer"
 	"github.com/Miuzarte/GoCVStreamer/fps"
+	"github.com/Miuzarte/GoCVStreamer/libyuv"
 	"github.com/Miuzarte/GoCVStreamer/logger"
 	"github.com/Miuzarte/GoCVStreamer/ui"
 	"github.com/Miuzarte/GoCVStreamer/utils"
@@ -32,11 +34,13 @@ type Config struct {
 
 	// https://github.com/ultralytics/ultralytics/blob/main/ultralytics/cfg/datasets/coco.yaml
 	ResultIds utils.Set[int]
+
+	CropSize int
 }
 
 func DefaultConfig() Config {
 	return Config{
-		Fps: 10,
+		Fps: 30,
 
 		ModelPath:          `B:\Git\go-vision\_weights\yolo26_weights\yolo26n.onnx`,
 		OnnxLibPath:        `B:\Git\GoCVStreamer\libs\onnxruntime-win-x64-gpu_cuda13-1.28.0\lib\onnxruntime.dll`,
@@ -67,6 +71,8 @@ type Engine struct {
 	// result
 	stats         Stats
 	personResults []yolo26.DetResult
+
+	idleCheck func() bool
 }
 
 func New(capturerServer *capturer.Server, cfg Config) (*Engine, error) {
@@ -148,12 +154,43 @@ func (e *Engine) OffsetResults(offset image.Point) {
 	}
 }
 
+func (e *Engine) ScaleResults(scaleX, scaleY float64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	for i := range e.personResults {
+		r := &e.personResults[i]
+		r.Box = image.Rect(
+			int(float64(r.Box.Min.X)*scaleX),
+			int(float64(r.Box.Min.Y)*scaleY),
+			int(float64(r.Box.Max.X)*scaleX),
+			int(float64(r.Box.Max.Y)*scaleY),
+		)
+	}
+}
+
+func (e *Engine) SetIdleChecker(fn func() bool) {
+	e.idleCheck = fn
+}
+
 func (e *Engine) Run(ctx context.Context) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
-	localImg := image.NewRGBA(e.capturerServer.Bounds())
+	bounds := e.capturerServer.Bounds()
+	localImg := image.NewRGBA(bounds)
 	var lastFrameId uint64
+
+	cropSize := e.cfg.CropSize
+	cropOffset := image.Pt(0, 0)
+	cropNeeded := false
+	if cropSize > 0 {
+		cropSize = min(cropSize, bounds.Dx(), bounds.Dy())
+		if cropSize < bounds.Dx() || cropSize < bounds.Dy() {
+			cropNeeded = true
+			cropOffset = image.Pt((bounds.Dx()-cropSize)/2, (bounds.Dy()-cropSize)/2)
+		}
+	}
 
 	interval := time.Second / time.Duration(e.cfg.Fps)
 
@@ -167,7 +204,16 @@ func (e *Engine) Run(ctx context.Context) {
 		case <-ticker.C:
 		}
 
-		e.capturerServer.Request(capturer.TagYOLO, interval)
+		if e.idleCheck != nil && e.idleCheck() {
+			e.mu.Lock()
+			e.stats = Stats{}
+			e.personResults = nil
+			e.mu.Unlock()
+			continue
+		}
+
+		// e.capturerServer.Request(capturer.TagYOLO, interval)
+		e.capturerServer.RaiseCeiling(e.cfg.Fps)
 
 		id := e.capturerServer.ReadFrameId()
 		if id == lastFrameId {
@@ -181,15 +227,29 @@ func (e *Engine) Run(ctx context.Context) {
 		}
 		copy(localImg.Pix, captureRgba.Pix)
 
-		tStart := time.Now()
-		err := e.Detect(localImg)
+		var detectImg image.Image = localImg
+		if cropNeeded {
+			cropImg := image.NewRGBA(image.Rect(0, 0, cropSize, cropSize))
+			draw.Draw(cropImg, cropImg.Bounds(), localImg, cropOffset, draw.Src)
+			detectImg = cropImg
+		}
+		origW := detectImg.Bounds().Dx()
+		origH := detectImg.Bounds().Dy()
+		detectImg = libyuv.ResizeRGBA(detectImg.(*image.RGBA), e.cfg.InputSize, e.cfg.InputSize)
+
+		err := e.Detect(detectImg)
 		if err != nil {
 			log.Warn().
 				Err(err).
 				Msg("yolo detection failed")
 			continue
 		}
-		e.stats.Cost = time.Since(tStart)
+		if origW != e.cfg.InputSize || origH != e.cfg.InputSize {
+			e.ScaleResults(float64(origW)/float64(e.cfg.InputSize), float64(origH)/float64(e.cfg.InputSize))
+		}
+		if cropNeeded {
+			e.OffsetResults(cropOffset)
+		}
 
 		e.stats.Fps, _ = e.fpsCounter.Count()
 	}

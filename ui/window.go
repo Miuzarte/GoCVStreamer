@@ -86,6 +86,10 @@ func (w *Window) App() *app.Window {
 	return &w.app
 }
 
+func (w *Window) Invalidate() {
+	w.app.Invalidate()
+}
+
 func (w *Window) Run(ctx context.Context) {
 	var ops op.Ops
 	for {

@@ -23,6 +23,7 @@ import (
 	"gioui.org/io/key"
 	"gioui.org/layout"
 
+	"github.com/Miuzarte/GoCVStreamer/assist"
 	"github.com/Miuzarte/GoCVStreamer/capturer"
 	cwg "github.com/Miuzarte/GoCVStreamer/contextWaitGroup"
 	"github.com/Miuzarte/GoCVStreamer/detector"
@@ -44,10 +45,11 @@ import (
 var debugging = DEBUGGING
 
 var (
-	nogui    = flag.Bool("nogui", false, "run without GUI window")
-	httpPort = flag.String("port", ":8080", "HTTP metrics server port")
-	nohttp   = flag.Bool("nohttp", false, "disable HTTP metrics server")
-	noyolo   = flag.Bool("noyolo", false, "disable YOLO person detection")
+	nogui       = flag.Bool("nogui", false, "run without GUI window")
+	httpPort    = flag.String("port", ":8080", "HTTP metrics server port")
+	nohttp      = flag.Bool("nohttp", false, "disable HTTP metrics server")
+	noyolo      = flag.Bool("noyolo", false, "disable YOLO person detection")
+	autodisplay = flag.Bool("autodisplay", false, "skip display selection, auto-select largest")
 )
 
 var log = logger.New("Streamer")
@@ -86,6 +88,7 @@ var (
 	matcherEngine  *matcher.Engine
 	detectorEngine *detector.Engine
 	recoilEngine   *recoil.Engine
+	assistEngine   *assist.Engine
 	window         *ui.Window
 
 	cpu         float64
@@ -153,7 +156,10 @@ func selectDisplay() {
 
 	ui.InitTheme()
 
-	capturerServer = capturer.NewServer(duplicator, MATCHING_MODE, func() {
+	cfg := capturer.Config{
+		MinFps: 1,
+	}
+	capturerServer = capturer.NewServer(duplicator, cfg, MATCHING_MODE, func() {
 		if window != nil && !*nogui {
 			window.App().Invalidate()
 		}
@@ -173,6 +179,22 @@ func selectDisplayInteractive() (int, error) {
 
 	if numDisplays <= 1 {
 		return 0, nil
+	}
+
+	if *autodisplay {
+		best := 0
+		maxRes := 0
+		for i := range numDisplays {
+			res := displayBounds[i].Size().X * displayBounds[i].Size().Y
+			if res > maxRes {
+				maxRes = res
+				best = i
+			}
+		}
+		log.Info().
+			Int("displayIndex", best).
+			Msg("auto selected display")
+		return best, nil
 	}
 
 	log.Info().
@@ -286,6 +308,21 @@ func main() {
 			Msg("detector disabled")
 	}
 
+	if detectorEngine != nil {
+		detectorEngine.SetIdleChecker(func() bool { return matcherEngine.InIdle() })
+
+		rawTracker, err := mouse.StartRawInput()
+		if err != nil {
+			log.Warn().
+				Err(err).
+				Msg("raw input tracker unavailable, aim assist disabled")
+		} else {
+			defer rawTracker.Stop()
+			assistCfg := assist.DefaultConfig()
+			assistEngine = assist.New(assistCfg, detectorEngine, capturerServer.Bounds())
+		}
+	}
+
 	if !*nogui {
 		window = ui.NewWindow(ui.Config{
 			Title:   windowTitle,
@@ -301,6 +338,9 @@ func main() {
 		window.Register(matcherEngine)
 		if detectorEngine != nil {
 			window.Register(detectorEngine)
+		}
+		if assistEngine != nil {
+			window.Register(assistEngine)
 		}
 		window.SetBounds(capturerServer.Bounds().Max)
 	}
@@ -318,6 +358,10 @@ func main() {
 	cwg.Go(cpuMeasureLoop)
 	cwg.Go(tmplWatchLoop)
 
+	if assistEngine != nil {
+		cwg.Go(assistEngine.Run)
+	}
+
 	if !*nogui {
 		cwg.Go(func(ctx context.Context) {
 			for {
@@ -333,6 +377,10 @@ func main() {
 		cwg.Go(func(ctx context.Context) {
 			window.Run(ctx)
 			*nogui = true
+		})
+		cwg.Go(func(ctx context.Context) {
+			<-ctx.Done()
+			window.Invalidate()
 		})
 	}
 
@@ -353,10 +401,10 @@ func r6sLoop(ctx context.Context) {
 		defer weaponsMu.RUnlock()
 
 		var to *w.Weapon
-		toName := "N/A"
+		// toName := "N/A"
 		if newIndex >= 0 {
 			to = weapons[newIndex]
-			toName = to.String()
+			// toName = to.String()
 		}
 
 		if newIndex >= 0 {
@@ -368,11 +416,11 @@ func r6sLoop(ctx context.Context) {
 		} else if newIndex == lastIndex {
 			return
 		} else {
-			log.Debug().
-				Int("fromIndex", lastIndex).
-				Int("toIndex", newIndex).
-				Str("toName", toName).
-				Msg("switching weapon")
+			// log.Debug().
+			// 	Int("fromIndex", lastIndex).
+			// 	Int("toIndex", newIndex).
+			// 	Str("toName", toName).
+			// 	Msg("switching weapon")
 		}
 
 		// no debounce when debugging
@@ -559,7 +607,8 @@ func tmplWatchLoop(ctx context.Context) {
 
 func initDetector() *detector.Engine {
 	cfg := detector.DefaultConfig()
-	cfg.Fps = 10
+	cfg.Fps = 30
+	cfg.CropSize = cfg.InputSize * 2
 
 	log.Debug().
 		Str("modelPath", cfg.ModelPath).
@@ -631,6 +680,11 @@ func (d *metricsDrawer) Draw(gtx layout.Context, s ui.DScale) {
 		recoilEngine.DisplayState(&sb)
 		sb.WriteByte('\n')
 		wp.DisplaySpeed(&sb, debugging)
+		sb.WriteByte('\n')
+	}
+
+	if assistEngine != nil {
+		assistEngine.DisplayState(&sb)
 		sb.WriteByte('\n')
 	}
 

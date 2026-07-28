@@ -20,6 +20,8 @@ const (
 	MB_LEFT   = 0
 	MB_MIDDLE = 1
 	MB_RIGHT  = 2
+
+	OurMouseExtraInfo = 0x474F4356
 )
 
 type MOUSEINPUT struct {
@@ -58,6 +60,18 @@ func Move(dx, dy int) error {
 			Dx:      int32(dx),
 			Dy:      int32(dy),
 			DwFlags: MOUSEEVENTF_MOVE,
+		},
+	})
+}
+
+func MoveAndMark(dx, dy int) error {
+	return send(&INPUT{
+		Type: INPUT_MOUSE,
+		Mi: MOUSEINPUT{
+			Dx:           int32(dx),
+			Dy:           int32(dy),
+			DwFlags:      MOUSEEVENTF_MOVE,
+			DwExtraInfo:  uintptr(OurMouseExtraInfo),
 		},
 	})
 }

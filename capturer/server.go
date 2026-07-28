@@ -14,6 +14,10 @@ import (
 	"gocv.io/x/gocv"
 )
 
+type Config struct {
+	MinFps int
+}
+
 var imageToMatWarnOnce sync.Once
 
 type Stats struct {
@@ -29,18 +33,6 @@ type Frame struct {
 	id   uint64
 }
 
-type RequestTag int
-
-const (
-	TagOpenCV RequestTag = iota
-	TagYOLO
-)
-
-type CaptureReq struct {
-	Tag      RequestTag
-	Interval time.Duration
-}
-
 type Server struct {
 	duplicator *DxgiDesktopDuplicator
 	fp         fps.Counter
@@ -49,29 +41,34 @@ type Server struct {
 	frame      Frame
 	screenRGBA *image.RGBA
 
-	req     chan CaptureReq
 	stats   Stats
 	onFrame func()
 	cvtCode gocv.ColorConversionCode
+	cfg     Config
 
-	lastTag     RequestTag
-	lastCapture time.Time
+	targetFps    int
+	targetExpiry time.Time
+	targetMu     sync.Mutex
 }
 
-func NewServer(d *DxgiDesktopDuplicator, mode gocv.IMReadFlag, onFrame func()) *Server {
+func NewServer(d *DxgiDesktopDuplicator, cfg Config, mode gocv.IMReadFlag, onFrame func()) *Server {
 	bounds := d.Bounds()
 	cvtCode := gocv.ColorRGBAToBGR
 	if mode == gocv.IMReadGrayScale {
 		cvtCode = gocv.ColorRGBAToGray
+	}
+	if cfg.MinFps <= 0 {
+		cfg.MinFps = 1
 	}
 	return &Server{
 		duplicator: d,
 		fp:         fps.NewCounter(time.Second),
 		frame:      Frame{mat: gocv.NewMat()},
 		screenRGBA: image.NewRGBA(bounds),
-		req:        make(chan CaptureReq, 2),
 		onFrame:    onFrame,
 		cvtCode:    cvtCode,
+		cfg:        cfg,
+		targetFps:  cfg.MinFps,
 	}
 }
 
@@ -79,11 +76,13 @@ func (s *Server) Bounds() image.Rectangle {
 	return s.duplicator.Bounds()
 }
 
-func (s *Server) Request(tag RequestTag, interval time.Duration) {
-	select {
-	case s.req <- CaptureReq{Tag: tag, Interval: interval}:
-	default:
+func (s *Server) RaiseCeiling(fps int) {
+	s.targetMu.Lock()
+	defer s.targetMu.Unlock()
+	if fps > s.targetFps {
+		s.targetFps = fps
 	}
+	s.targetExpiry = time.Now().Add(3 * time.Second)
 }
 
 func (s *Server) ReadRgba() *image.RGBA {
@@ -131,27 +130,30 @@ func (s *Server) Run(ctx context.Context) {
 	rawRGBA := image.NewRGBA(s.duplicator.Bounds())
 
 	for {
-		var req CaptureReq
 		select {
 		case <-ctx.Done():
 			return
-		case req = <-s.req:
+		default:
 		}
 
-		if req.Tag != s.lastTag && time.Since(s.lastCapture) < req.Interval {
-			continue
+		s.targetMu.Lock()
+		if time.Now().After(s.targetExpiry) {
+			s.targetFps = s.cfg.MinFps
 		}
-		s.lastTag = req.Tag
-		s.lastCapture = time.Now()
+		fps := s.targetFps
+		s.targetMu.Unlock()
 
 		tStart := time.Now()
 
-		err := s.duplicator.GetImage(rawRGBA)
+		err := s.duplicator.GetImageTimeout(rawRGBA, 10)
 		if err == outputduplication.ErrNoImageYet {
 			continue
 		}
 		if err != nil {
-			log.Error().Err(err).Msg("capture error")
+			log.Error().
+				Err(err).
+				Msg("capture error")
+			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 
@@ -174,6 +176,11 @@ func (s *Server) Run(ctx context.Context) {
 
 		if s.onFrame != nil {
 			s.onFrame()
+		}
+
+		interval := time.Second / time.Duration(fps)
+		if elapsed := time.Since(tStart); elapsed < interval {
+			time.Sleep(interval - elapsed)
 		}
 	}
 }
