@@ -2,6 +2,7 @@ package weapon
 
 import (
 	"fmt"
+	"io"
 	"math"
 	"path/filepath"
 	"strconv"
@@ -15,10 +16,10 @@ import (
 type Slot int
 
 const (
-	SLOT_UNDEFINED = 0
-	SLOT_PRIMARY   = 1 << 0
-	SLOT_SECONDARY = 1 << 1
-	SLOT_MIX       = SLOT_PRIMARY | SLOT_SECONDARY
+	SLOT_UNDEFINED Slot = 0
+	SLOT_PRIMARY   Slot = 1 << 0
+	SLOT_SECONDARY Slot = 1 << 1
+	SLOT_MIX       Slot = SLOT_PRIMARY | SLOT_SECONDARY
 )
 
 func (s Slot) Has(other Slot) bool {
@@ -453,27 +454,32 @@ func (w *Weapon) GetAllSpeeds(orig bool) (speedMain int, speedMainF uint, speedA
 	return
 }
 
-func (w *Weapon) DisplaySpeed(debug bool) string {
+func (w *Weapon) DisplaySpeed(
+	sw interface {
+		io.StringWriter
+		io.Writer
+	}, debug bool,
+) {
 	if w == nil {
-		return "No weapon"
+		sw.WriteString("No weapon")
+		return
 	}
+
 	spMain, spMainF, spAlt, spAltF := w.GetAllSpeeds(debug)
 	typ := w.Class.Detail().Type
 
-	var b strings.Builder
-	b.WriteString(w.Name)
-	b.WriteByte('\n')
-	if typ.Has(TYPE_FULL_AUTO) || !typ.Has(TYPE_SEMI_AUTO) {
-		fmt.Fprintf(&b, "FA: %s / %s\n",
+	fmt.Fprintf(sw, "\n%s\n", w.Name)
+	if typ.Has(TYPE_FULL_AUTO) {
+		fmt.Fprintf(sw, "FA: %s / %s\n",
 			formatSpeed(spMain, int(spMainF)),
 			formatSpeed(spAlt, int(spAltF)))
 	}
-	if typ.Has(TYPE_SEMI_AUTO) || !typ.Has(TYPE_FULL_AUTO) {
-		fmt.Fprintf(&b, "SA: %s / %s",
+	if typ.Has(TYPE_SEMI_AUTO) {
+		fmt.Fprintf(sw, "SA: %s / %s",
 			formatSpeed(spMain, int(spMainF)),
 			formatSpeed(spAlt, int(spAltF)))
 	}
-	return b.String()
+	return
 }
 
 func formatSpeed(intPart, frac int) string {

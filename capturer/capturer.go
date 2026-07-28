@@ -12,17 +12,17 @@ import (
 	"github.com/kirides/go-d3d/win"
 )
 
-var log = logger.New("Capture")
+var log = logger.New("Capturer")
 
 type DxgiDesktopDuplicator struct {
 	FramesElapsed int
 
+	mu           sync.Mutex
 	displayIndex int
 	device       *d3d11.ID3D11Device
 	deviceCtx    *d3d11.ID3D11DeviceContext
 	ddup         *outputduplication.OutputDuplicator
 	screenBounds image.Rectangle
-	mu           sync.Mutex
 }
 
 func New(displayIndex int) (ss *DxgiDesktopDuplicator, err error) {

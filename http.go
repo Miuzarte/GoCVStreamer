@@ -9,59 +9,53 @@ import (
 )
 
 type MetricsSnapshot struct {
-	CaptureFPS    float64 `json:"capture_fps"`
+	CaptureFps    float64 `json:"capture_fps"`
 	CaptureCostMs float64 `json:"capture_cost_ms"`
-	MatchFPS      float64 `json:"match_fps"`
-	MatchCostMs   float64 `json:"match_cost_ms"`
-	YoloFPS       float64 `json:"yolo_fps"`
-	YoloCostMs    float64 `json:"yolo_cost_ms"`
+	FramesElapsed int     `json:"frames_elapsed"`
 
-	FramesElapsed int  `json:"frames_elapsed"`
-	Debugging     bool `json:"debugging"`
+	MatchFps       float64 `json:"match_fps"`
+	MatchCostMs    float64 `json:"match_cost_ms"`
+	MatchCount     int     `json:"match_count"`
+	MatchCostAvgMs float64 `json:"match_cost_avg_ms"`
 
-	Cpu float64 `json:"cpu"`
+	Idle          bool    `json:"idle"`
+	Narrowing     bool    `json:"narrowing"`
+	WeaponFound   bool    `json:"weapon_found"`
+	WeaponVal     float32 `json:"weapon_val"`
+	CurrentWeapon string  `json:"current_weapon"`
+
+	DetectionFps    float64 `json:"detection_fps"`
+	DetectionCostMs float64 `json:"detection_cost_ms"`
+	DetectionCount  int     `json:"detection_count"`
+
+	Cpu       float64 `json:"cpu"`
+	Debugging bool    `json:"debugging"`
 
 	GcCount      int     `json:"gc_count"`
 	GcPauseAvgUs float64 `json:"gc_pause_avg_us"`
 	GcSinceLastS float64 `json:"gc_since_last_s"`
-
-	MatchCostTotalMs float64 `json:"match_cost_total_ms"`
-	MatchCount       int     `json:"match_count"`
-	MatchCostAvgMs   float64 `json:"match_cost_avg_ms"`
-
-	PersonDetCostMs float64 `json:"person_det_ms"`
-	PersonDetCount  int     `json:"person_det_count"`
-
-	CurrentWeapon string  `json:"current_weapon"`
-	WeaponFound   bool    `json:"weapon_found"`
-	WeaponVal     float32 `json:"weapon_val"`
-	Idle          bool    `json:"idle"`
-	Narrowing     bool    `json:"narrowing"`
 }
 
 var lastGCStats debug.GCStats
 
-func snapshotMetrics() MetricsSnapshot {
+func snapshotMetrics() (m MetricsSnapshot) {
 	const ms = float64(time.Millisecond)
 	const us = float64(time.Microsecond)
 
-	var m MetricsSnapshot
-
-	if capSrv != nil {
-		s := capSrv.Stats()
-		m.CaptureFPS = s.FPS
-		m.CaptureCostMs = s.CostMs()
+	if capturerServer != nil {
+		s := capturerServer.Stats()
+		m.CaptureFps = s.FPS
+		m.CaptureCostMs = float64(s.Cost) / ms
 		m.FramesElapsed = s.FrameCount
 	}
 
-	if matcherEng != nil {
-		s := matcherEng.Stats()
-		m.MatchFPS = s.FPS
-		m.MatchCostMs = s.CostMs
-		m.MatchCostTotalMs = s.CostMs
+	if matcherEngine != nil {
+		s := matcherEngine.Stats()
+		m.MatchFps = s.Fps
+		m.MatchCostMs = float64(s.Cost) / ms
 		m.MatchCount = s.Matched
 		if s.Matched > 0 {
-			m.MatchCostAvgMs = s.CostMs / float64(s.Matched)
+			m.MatchCostAvgMs = m.MatchCostMs / float64(s.Matched)
 		}
 		m.Idle = s.Idle
 		m.Narrowing = s.Narrowing
@@ -69,18 +63,18 @@ func snapshotMetrics() MetricsSnapshot {
 		m.WeaponVal = s.Confidence
 
 		if s.Found {
-			weap := eng.Weapon()
+			weap := recoilEngine.Weapon()
 			if weap != nil {
 				m.CurrentWeapon = weap.String()
 			}
 		}
 	}
 
-	if detEng != nil {
-		results, count, cost := detEng.Snapshot()
-		_ = results
-		m.PersonDetCount = count
-		m.PersonDetCostMs = float64(cost) / ms
+	if detectorEngine != nil {
+		results, s := detectorEngine.Snapshot()
+		m.DetectionFps = s.Fps
+		m.DetectionCostMs = float64(s.Cost) / ms
+		m.DetectionCount = len(results)
 	}
 
 	m.Cpu = cpu
@@ -89,11 +83,13 @@ func snapshotMetrics() MetricsSnapshot {
 	debug.ReadGCStats(&lastGCStats)
 	if lastGCStats.NumGC > 0 {
 		m.GcCount = int(lastGCStats.NumGC)
-		m.GcPauseAvgUs = float64(lastGCStats.PauseTotal) / float64(lastGCStats.NumGC) / us
+		if lastGCStats.NumGC > 0 {
+			m.GcPauseAvgUs = float64(lastGCStats.PauseTotal) / float64(lastGCStats.NumGC) / us
+		}
 		m.GcSinceLastS = time.Since(lastGCStats.LastGC).Seconds()
 	}
 
-	return m
+	return
 }
 
 func startHttpServer(ctx context.Context, addr string) {

@@ -13,6 +13,7 @@ import (
 
 	"github.com/Miuzarte/GoCVStreamer/capturer"
 	"github.com/Miuzarte/GoCVStreamer/fps"
+	"github.com/Miuzarte/GoCVStreamer/logger"
 	"github.com/Miuzarte/GoCVStreamer/ui"
 	w "github.com/Miuzarte/GoCVStreamer/weapon"
 	ws "github.com/Miuzarte/GoCVStreamer/weapons"
@@ -20,18 +21,22 @@ import (
 )
 
 const (
-	MatchThreshold = 0.9
-
-	WEAPON_INDEX_NONE = -1
-
+	MATCH_THRESHOLD      = 0.9
+	WEAPON_INDEX_NONE    = -1
 	DRAW_NEGATIVE_RESULT = false
 )
 
+var log = logger.New("Matcher")
+
 type Config struct {
-	CapSrv    *capturer.Server
-	ROIRect   image.Rectangle
+	Fps              int
+	FpsIdle          int
+	DropIdleDuration time.Duration
+
 	Weapons   ws.Weapons
 	WeaponsMu *sync.RWMutex
+
+	RoiRect   image.Rectangle
 	Debugging bool
 }
 
@@ -44,8 +49,8 @@ type MatchResult struct {
 }
 
 type Stats struct {
-	FPS        float64
-	CostMs     float64
+	Fps        float64
+	Cost       time.Duration
 	Matched    int
 	Found      bool
 	Confidence float32
@@ -54,32 +59,38 @@ type Stats struct {
 }
 
 type Engine struct {
-	cfg Config
-	fp  fps.Counter
+	mu         sync.RWMutex
+	fpsCounter fps.Counter
 
-	mu             sync.RWMutex
-	roiRect        image.Rectangle
-	result         MatchResult
-	stats          Stats
+	capturerServer *capturer.Server
+	cfg            Config
+
+	roiRect image.Rectangle
+
+	// state
 	lastFoundTime  time.Time
 	inIdle         bool
 	narrowing      bool
 	lastSlot       w.Slot
-	lastTempl      int
-	showROIPosTill time.Time
+	lastTmpl       int
+	showRoiPosTill time.Time
 
+	// result
+	stats    Stats
+	result   MatchResult
 	resultCh chan int
-	capSrv   *capturer.Server
 }
 
-func New(cfg Config) *Engine {
+func New(capturerServer *capturer.Server, cfg Config) *Engine {
 	return &Engine{
-		cfg:        cfg,
-		fp:         fps.NewCounter(time.Second),
-		roiRect:    cfg.ROIRect,
-		resultCh:   make(chan int, 1),
-		lastSlot:   w.Slot(w.SLOT_UNDEFINED),
-		capSrv:     cfg.CapSrv,
+		cfg:            cfg,
+		fpsCounter:     fps.NewCounter(time.Second),
+		capturerServer: capturerServer,
+
+		roiRect:  cfg.RoiRect,
+		lastSlot: w.Slot(w.SLOT_UNDEFINED),
+
+		resultCh: make(chan int, 1),
 	}
 }
 
@@ -99,17 +110,11 @@ func (e *Engine) Stats() Stats {
 	return e.stats
 }
 
-func (e *Engine) SetROI(r image.Rectangle) {
+func (e *Engine) SetRoi(r image.Rectangle) {
 	e.mu.Lock()
 	e.roiRect = r
-	e.showROIPosTill = time.Now().Add(time.Second * 3)
+	e.showRoiPosTill = time.Now().Add(time.Second * 3)
 	e.mu.Unlock()
-}
-
-func (e *Engine) ROI() image.Rectangle {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	return e.roiRect
 }
 
 func (e *Engine) InIdle() bool {
@@ -151,18 +156,15 @@ func (e *Engine) Run(ctx context.Context) {
 	capture := gocv.NewMat()
 	defer capture.Close()
 
-	const (
-		interval         = time.Second / 5
-		intervalIdle     = time.Second / 2
-		dropIdleDuration = time.Second * 5
-	)
+	interval := time.Second / time.Duration(e.cfg.Fps)
+	intervalIdle := time.Second / time.Duration(e.cfg.FpsIdle)
 
 	tickerNormal := time.NewTicker(interval)
 	defer tickerNormal.Stop()
 	tickerIdle := time.NewTicker(intervalIdle)
 	defer tickerIdle.Stop()
-	inner := make(chan time.Time, 2)
-	defer close(inner)
+	mixinTicker := make(chan time.Time, 2)
+	defer close(mixinTicker)
 
 	for {
 		select {
@@ -173,114 +175,121 @@ func (e *Engine) Run(ctx context.Context) {
 			if !ok {
 				return
 			}
-			if e.InIdle() {
+			if e.inIdle {
 				continue
 			}
 			select {
-			case inner <- t:
+			case mixinTicker <- t:
 			default:
 			}
+			continue
 		case t, ok := <-tickerIdle.C:
 			if !ok {
 				return
 			}
-			if !e.InIdle() {
+			if !e.inIdle {
 				continue
 			}
 			select {
-			case inner <- t:
+			case mixinTicker <- t:
 			default:
 			}
+			continue
 
-		case _, ok := <-inner:
+		case _, ok := <-mixinTicker:
 			if !ok {
 				return
 			}
+		}
 
-			reqInterval := interval
-			if e.InIdle() {
-				reqInterval = intervalIdle
+		reqInterval := interval
+		if e.inIdle {
+			reqInterval = intervalIdle
+		}
+		e.capturerServer.Request(capturer.TagOpenCV, reqInterval)
+
+		frameId := e.capturerServer.ReadFrameId()
+		if frameId == 0 {
+			continue
+		}
+
+		frameMat := e.capturerServer.ReadMat()
+		frameMat.CopyTo(&capture)
+
+		e.mu.RLock()
+		roi := e.roiRect
+		e.mu.RUnlock()
+		if !roi.In(e.capturerServer.Bounds()) {
+			continue
+		}
+
+		captureRoi := capture.Region(roi)
+		tStart := time.Now()
+
+		slotFilter := w.SLOT_UNDEFINED
+		e.mu.RLock()
+		if e.narrowing {
+			slotFilter = e.lastSlot.Opposite()
+		}
+		e.mu.RUnlock()
+
+		idx, matched, found := e.matchWeapon(captureRoi, slotFilter)
+		e.stats.Cost = time.Since(tStart)
+		e.stats.Matched = matched
+		captureRoi.Close()
+
+		e.stats.Fps, _ = e.fpsCounter.Count()
+
+		e.mu.Lock()
+
+		e.stats.Found = found
+		if found {
+			e.lastFoundTime = time.Now()
+			e.inIdle = false
+			e.narrowing = false
+
+			e.cfg.WeaponsMu.RLock()
+			var confidence float32
+			if idx >= 0 && idx < len(e.cfg.Weapons) {
+				confidence = e.cfg.Weapons[idx].Template.MaxVal
+				e.lastSlot = e.cfg.Weapons[idx].Class.Detail().Slot
+				if e.lastSlot != w.SLOT_UNDEFINED && !e.lastSlot.Is(w.SLOT_MIX) {
+					e.narrowing = true
+				}
+				e.lastTmpl = idx
 			}
-			e.capSrv.Request(capturer.TagOpenCV, reqInterval)
+			e.cfg.WeaponsMu.RUnlock()
 
-			frameID := e.capSrv.ReadFrameID()
-			if frameID == 0 {
-				continue
+			e.result = MatchResult{
+				Found:       true,
+				WeaponIndex: idx,
+				Confidence:  confidence,
+				Matched:     matched,
 			}
+			e.stats.Confidence = confidence
+			e.stats.Idle = e.inIdle
+			e.stats.Narrowing = e.narrowing
+			e.mu.Unlock()
 
-			frameMat := e.capSrv.ReadMat()
-			frameMat.CopyTo(&capture)
-
-			roi := e.ROI()
-			if !roi.In(e.capSrv.Bounds()) {
-				continue
+			select {
+			case e.resultCh <- idx:
+			default:
 			}
-
-			captureRoi := capture.Region(roi)
-			tStart := time.Now()
-
-			slotFilter := w.Slot(w.SLOT_UNDEFINED)
-			e.mu.RLock()
-			if e.narrowing {
-				slotFilter = e.lastSlot.Opposite()
-			}
-			e.mu.RUnlock()
-
-			idx, matched, found := e.matchWeapon(captureRoi, slotFilter)
-			elapsed := time.Since(tStart)
-			captureRoi.Close()
-
-			fps, _ := e.fp.Count()
-
-			e.mu.Lock()
-			e.stats.FPS = fps
-			e.stats.CostMs = float64(elapsed) / float64(time.Millisecond)
-			e.stats.Matched = matched
-
-			if found {
-				e.lastFoundTime = time.Now()
-				e.inIdle = false
+		} else {
+			if time.Since(e.lastFoundTime) > e.cfg.DropIdleDuration && !e.cfg.Debugging {
+				e.inIdle = true
 				e.narrowing = false
+				e.lastSlot = w.SLOT_UNDEFINED
+			}
 
-				e.cfg.WeaponsMu.RLock()
-				var confidence float32
-				if idx >= 0 && idx < len(e.cfg.Weapons) {
-					confidence = e.cfg.Weapons[idx].Template.MaxVal
-					e.lastSlot = e.cfg.Weapons[idx].Class.Detail().Slot
-					if e.lastSlot != w.SLOT_UNDEFINED && !e.lastSlot.Is(w.SLOT_MIX) {
-						e.narrowing = true
-					}
-					e.lastTempl = idx
-				}
-				e.cfg.WeaponsMu.RUnlock()
+			e.result = MatchResult{}
+			e.stats.Idle = e.inIdle
+			e.stats.Narrowing = e.narrowing
+			e.mu.Unlock()
 
-				e.result = MatchResult{Found: true, WeaponIndex: idx, Confidence: confidence, Matched: matched}
-				e.stats.Found = true
-				e.stats.Confidence = confidence
-				e.stats.Idle = false
-				e.stats.Narrowing = e.narrowing
-				e.mu.Unlock()
-
-				select {
-				case e.resultCh <- idx:
-				default:
-				}
-			} else {
-				if time.Since(e.lastFoundTime) > dropIdleDuration && !e.cfg.Debugging {
-					e.inIdle = true
-					e.narrowing = false
-					e.lastSlot = w.SLOT_UNDEFINED
-				}
-				e.result = MatchResult{}
-				e.stats.Found = false
-				e.stats.Idle = e.inIdle
-				e.stats.Narrowing = e.narrowing
-				e.mu.Unlock()
-
-				select {
-				case e.resultCh <- WEAPON_INDEX_NONE:
-				default:
-				}
+			select {
+			case e.resultCh <- WEAPON_INDEX_NONE:
+			default:
 			}
 		}
 	}
@@ -293,7 +302,7 @@ func (e *Engine) matchWeapon(image gocv.Mat, slotFilter w.Slot) (templateIndex, 
 	const method = gocv.TmCcoeffNormed
 
 	e.mu.RLock()
-	start := e.lastTempl
+	start := e.lastTmpl
 	e.mu.RUnlock()
 
 	// 从上次成功的模板开始往下匹配
@@ -314,7 +323,7 @@ func (e *Engine) matchWeapon(image gocv.Mat, slotFilter w.Slot) (templateIndex, 
 
 		templateMatched++
 
-		if tmpl.Template.MaxVal >= MatchThreshold {
+		if tmpl.Template.MaxVal >= MATCH_THRESHOLD {
 			// 跳过剩余匹配
 			found = true
 			break
@@ -325,11 +334,9 @@ func (e *Engine) matchWeapon(image gocv.Mat, slotFilter w.Slot) (templateIndex, 
 }
 
 func (e *Engine) Draw(gtx layout.Context, s ui.DScale) {
-	e.mu.RLock()
 	roi := e.roiRect
 	result := e.result
-	showPosTill := e.showROIPosTill
-	e.mu.RUnlock()
+	showPosTill := e.showRoiPosTill
 
 	roiRect := s.Rect(roi)
 	ui.DrawBorder(gtx, ui.ColorCoral.NRGBA(), roiRect)

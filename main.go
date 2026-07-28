@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,9 +26,10 @@ import (
 	"github.com/Miuzarte/GoCVStreamer/capturer"
 	cwg "github.com/Miuzarte/GoCVStreamer/contextWaitGroup"
 	"github.com/Miuzarte/GoCVStreamer/detector"
-	"github.com/Miuzarte/GoCVStreamer/engine"
 	"github.com/Miuzarte/GoCVStreamer/logger"
 	"github.com/Miuzarte/GoCVStreamer/matcher"
+	"github.com/Miuzarte/GoCVStreamer/mouse"
+	"github.com/Miuzarte/GoCVStreamer/recoil"
 	"github.com/Miuzarte/GoCVStreamer/ui"
 	w "github.com/Miuzarte/GoCVStreamer/weapon"
 	ws "github.com/Miuzarte/GoCVStreamer/weapons"
@@ -78,15 +78,15 @@ var (
 	roiRectSize = image.Point{8 * 11, 8 * 13}
 	roiRectPos  = image.Point{2000, 1200}
 	// Xmid: 2045
-	roiRect     = image.Rectangle{roiRectPos, roiRectPos.Add(roiRectSize)}
+	roiRect = image.Rectangle{roiRectPos, roiRectPos.Add(roiRectSize)}
 )
 
 var (
-	capSrv     *capturer.Server
-	matcherEng *matcher.Engine
-	detEng     *detector.Engine
-	eng        *engine.Engine
-	win        *ui.Window
+	capturerServer *capturer.Server
+	matcherEngine  *matcher.Engine
+	detectorEngine *detector.Engine
+	recoilEngine   *recoil.Engine
+	window         *ui.Window
 
 	cpu         float64
 	forceUpdate bool
@@ -153,16 +153,18 @@ func selectDisplay() {
 
 	ui.InitTheme()
 
-	capSrv = capturer.NewServer(duplicator, MATCHING_MODE, func() {
-		if win != nil && !*nogui {
-			win.App().Invalidate()
+	capturerServer = capturer.NewServer(duplicator, MATCHING_MODE, func() {
+		if window != nil && !*nogui {
+			window.App().Invalidate()
 		}
 	})
 }
 
 func selectDisplayInteractive() (int, error) {
 	numDisplays := screenshot.NumActiveDisplays()
-	log.Info().Int("activeDisplays", numDisplays).Msg("active displays detected")
+	log.Info().
+		Int("activeDisplays", numDisplays).
+		Msg("active displays detected")
 
 	displayBounds := make([]image.Rectangle, numDisplays)
 	for i := range numDisplays {
@@ -173,7 +175,8 @@ func selectDisplayInteractive() (int, error) {
 		return 0, nil
 	}
 
-	log.Info().Msg("multi displays detected")
+	log.Info().
+		Msg("multi displays detected")
 	for i := range numDisplays {
 		size := displayBounds[i].Size()
 		fmt.Fprintf(os.Stdout, "[%d] %dx%d (X:%d, Y:%d)\n", i, size.X, size.Y, displayBounds[i].Min.X, displayBounds[i].Min.Y)
@@ -191,7 +194,11 @@ func selectDisplayInteractive() (int, error) {
 		if input != "" {
 			index, err := strconv.Atoi(input)
 			if err != nil || index < 0 || index >= numDisplays {
-				log.Warn().Str("input", input).Int("min", 0).Int("max", numDisplays-1).Msg("invalid display index input")
+				log.Warn().
+					Str("input", input).
+					Int("min", 0).
+					Int("max", numDisplays-1).
+					Msg("invalid display index input")
 				continue
 			}
 			return index, nil
@@ -207,7 +214,9 @@ func selectDisplayInteractive() (int, error) {
 				best = i
 			}
 		}
-		log.Info().Int("displayIndex", best).Msg("auto selected display")
+		log.Info().
+			Int("displayIndex", best).
+			Msg("auto selected display")
 		return best, nil
 	}
 }
@@ -221,7 +230,10 @@ func loadTemplates() {
 		panicIf(weapons.Close())
 	}
 	panicIf(weapons.ReadFrom(TEMPLATES_DIRECTORY, 1, TEMPLATES_SUFFIX, TEMPLATES_PREFIX_IGNORE, CREATE_MASK, MATCHING_MODE))
-	log.Info().Int("templates", len(weapons)).Dur("cost", time.Since(tStart)).Msg("templates loaded")
+	log.Info().
+		Int("templates", len(weapons)).
+		Dur("cost", time.Since(tStart)).
+		Msg("templates loaded")
 }
 
 func main() {
@@ -229,21 +241,14 @@ func main() {
 		weaponsMu.Lock()
 		defer weaponsMu.Unlock()
 
-		if capSrv != nil {
-			capSrv.Close()
+		if capturerServer != nil {
+			capturerServer.Close()
 		}
 		weapons.Close()
-		if detEng != nil {
-			detEng.Close()
+		if detectorEngine != nil {
+			detectorEngine.Close()
 		}
 	}()
-
-	if !*noyolo {
-		detEng = initDetector()
-	}
-	if detEng == nil {
-		log.Warn().Msg("person detection disabled")
-	}
 
 	cwg := cwg.New(context.Background())
 	cwg.WithSignal(syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
@@ -255,43 +260,57 @@ func main() {
 		})
 	}
 
-	matcherEng = matcher.New(matcher.Config{
-		CapSrv:    capSrv,
-		ROIRect:   roiRect,
+	matcherCfg := matcher.Config{
+		Fps:              5,
+		FpsIdle:          2,
+		DropIdleDuration: time.Second * 5,
+
 		Weapons:   weapons,
 		WeaponsMu: &weaponsMu,
+		RoiRect:   roiRect,
 		Debugging: debugging,
-	})
+	}
+	matcherEngine = matcher.New(capturerServer, matcherCfg)
 
-	clicker := engine.NewClicker(cwg.Ctx)
-	eng = engine.New(clicker, engine.Config{Debugging: debugging})
+	clicker := mouse.NewClicker(cwg.Ctx)
+	recoilCfg := recoil.Config{
+		Debugging: debugging,
+	}
+	recoilEngine = recoil.New(clicker, recoilCfg)
+
+	if !*noyolo {
+		detectorEngine = initDetector()
+	}
+	if detectorEngine == nil {
+		log.Warn().
+			Msg("detector disabled")
+	}
 
 	if !*nogui {
-		win = ui.NewWindow(ui.Config{
+		window = ui.NewWindow(ui.Config{
 			Title:   windowTitle,
 			MinSize: image.Pt(1280, 720),
 			Size:    image.Pt(1280, 720),
 		})
-		win.SetShortcuts(createShortcuts(win.App()))
-		win.Register(&metricsDrawer{
+		window.SetShortcuts(createShortcuts(window.App()))
+		window.Register(&metricsDrawer{
 			inputting:      &inputting,
 			inputMainOrAlt: &inputMainOrAlt,
 			inputBuf:       &inputBuf,
 		})
-		win.Register(matcherEng)
-		win.Register(eng)
-		if detEng != nil {
-			win.Register(detEng)
+		window.Register(matcherEngine)
+		if detectorEngine != nil {
+			window.Register(detectorEngine)
 		}
-		win.SetBounds(capSrv.Bounds().Max)
+		window.SetBounds(capturerServer.Bounds().Max)
 	}
 
-	cwg.Go(capSrv.Run)
-	cwg.Go(matcherEng.Run)
+	cwg.Go(capturerServer.Run)
+	cwg.Go(matcherEngine.Run)
 
-	if detEng != nil {
+	if detectorEngine != nil {
 		cwg.Go(func(ctx context.Context) {
-			detEng.Run(ctx, capSrv)
+			detectorEngine.Run(ctx)
 		})
 	}
 
@@ -307,12 +326,12 @@ func main() {
 					return
 				default:
 				}
-				win.SetScreenImage(capSrv.ReadScreen())
+				window.SetScreenImage(capturerServer.ReadScreen())
 				time.Sleep(time.Second / 60)
 			}
 		})
 		cwg.Go(func(ctx context.Context) {
-			win.Run(ctx)
+			window.Run(ctx)
 			*nogui = true
 		})
 	}
@@ -377,7 +396,7 @@ func r6sLoop(ctx context.Context) {
 		}
 
 		lastIndex = newIndex
-		eng.SetWeapon(to)
+		recoilEngine.SetWeapon(to)
 	}
 
 	ticker := time.NewTicker(time.Second / 125)
@@ -387,10 +406,10 @@ func r6sLoop(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case newIndex := <-matcherEng.ResultCh():
+		case newIndex := <-matcherEngine.ResultCh():
 			applyWeapon(newIndex)
 		case <-ticker.C:
-			eng.Tick()
+			recoilEngine.Tick()
 		}
 	}
 }
@@ -540,9 +559,9 @@ func tmplWatchLoop(ctx context.Context) {
 
 func initDetector() *detector.Engine {
 	cfg := detector.DefaultConfig()
+	cfg.Fps = 10
 
-	pLog := logger.New("Person")
-	pLog.Debug().
+	log.Debug().
 		Str("modelPath", cfg.ModelPath).
 		Str("onnxLibPath", cfg.OnnxLibPath).
 		Float32("confThresh", cfg.ConfThresh).
@@ -550,24 +569,24 @@ func initDetector() *detector.Engine {
 		Bool("useCuda", cfg.UseCuda).
 		Bool("useTensorRT", cfg.UseTensorRT).
 		Str("tensorRTPluginPath", cfg.TensorRTPluginPath).
-		Msg("initializing person engine")
+		Msg("initializing detector engine")
 
-	engine, err := detector.New(cfg, pLog)
+	engine, err := detector.New(capturerServer, cfg)
 	if err != nil {
-		pLog.Error().Err(err).Msg("failed to init person engine")
+		log.Error().Err(err).Msg("failed to init person engine")
 		return nil
 	}
 
-	pLog.Info().Msg("person engine initialized")
+	log.Info().Msg("person engine initialized")
 	return engine
 }
 
 var (
-	showPosTill      time.Time
-	inputting        bool
-	inputMainOrAlt   bool
-	inputBuf         bytes.Buffer
-	weaponNameLongest int
+	showPosTill           time.Time
+	inputting             bool
+	inputMainOrAlt        bool
+	inputBuf              bytes.Buffer
+	weaponNameLongest     int
 	onceWeaponNameLongest sync.Once
 )
 
@@ -578,39 +597,24 @@ type metricsDrawer struct {
 }
 
 func (d *metricsDrawer) Draw(gtx layout.Context, s ui.DScale) {
-	var gc debug.GCStats
-	debug.ReadGCStats(&gc)
+	m := snapshotMetrics()
 
 	var sb strings.Builder
 
-	cap := capSrv.Stats()
-	mat := matcherEng.Stats()
-	var det detector.Stats
+	fmt.Fprintf(&sb, "| Capture: %.0ffps(%.1fms)", m.CaptureFps, m.CaptureCostMs)
 
-	fmt.Fprintf(&sb, "| Capture: %.0ffps(%.1fms)", cap.FPS, cap.CostMs())
+	fmt.Fprintf(&sb, " | Match: %.0ffps(%.1fms/%d=%.2fms)", m.MatchFps, m.MatchCostMs, m.MatchCount, safeDiv(m.MatchCostMs, float64(m.MatchCount)))
 
-	fmt.Fprintf(&sb, " | OpenCV: %.0ffps(%.1fms)", mat.FPS, mat.CostMs)
-
-	if detEng != nil {
-		det = detEng.Stats()
-		fmt.Fprintf(&sb, " | YOLO: %.0ffps/%d(%.1fms)", det.FPS, det.Count, det.CostMs)
+	if detectorEngine != nil {
+		fmt.Fprintf(&sb, " | Detection: %.0ffps/%d(%.1fms) |", m.DetectionFps, m.DetectionCount, m.DetectionCostMs)
 	}
+	sb.WriteByte('\n')
 
-	fmt.Fprintf(&sb, " | 0x%04X |", cap.FrameCount)
+	fmt.Fprintf(&sb, "| 0x%04X | CPU: %04.1f%% | GC: %d(avg: %.2fus, last: %.2fs) |", m.FramesElapsed, cpu, m.GcCount, m.GcPauseAvgUs, m.GcSinceLastS)
 	if debugging {
 		sb.WriteString(" DEBUG |")
 	}
 	sb.WriteByte('\n')
-
-	const us = float64(time.Microsecond)
-	fmt.Fprintf(&sb, "| CPU: %04.1f%% | GC: %d", cpu, gc.NumGC)
-	if gc.NumGC > 0 {
-		avgUs := float64(gc.PauseTotal) / float64(gc.NumGC) / us
-		sinceS := time.Since(gc.LastGC).Seconds()
-		fmt.Fprintf(&sb, "(avg: %.2fus, last: %.2fs)", avgUs, sinceS)
-	}
-	fmt.Fprintf(&sb, " | 匹配: %.1fms/%d=%.2fms |\n\n",
-		mat.CostMs, mat.Matched, safeDiv(mat.CostMs, float64(mat.Matched)))
 
 	if *d.inputting {
 		if !*d.inputMainOrAlt {
@@ -622,12 +626,12 @@ func (d *metricsDrawer) Draw(gtx layout.Context, s ui.DScale) {
 		sb.WriteByte('\n')
 	}
 
-	if eng != nil {
-		weap := eng.Weapon()
-		if weap != nil {
-			sb.WriteString(weap.DisplaySpeed(debugging))
-			sb.WriteByte('\n')
-		}
+	if recoilEngine != nil {
+		wp := recoilEngine.Weapon()
+		recoilEngine.DisplayState(&sb)
+		sb.WriteByte('\n')
+		wp.DisplaySpeed(&sb, debugging)
+		sb.WriteByte('\n')
 	}
 
 	ui.DrawList(gtx, strings.Split(strings.TrimSpace(sb.String()), "\n"))
@@ -680,14 +684,14 @@ func createShortcuts(receiver any) widgets.Shortcuts {
 
 		widgets.NewShortcut("F", "f").
 			Do(func(_ key.Name, _ key.Modifiers) {
-				capSrv.ResetFramesElapsed()
+				capturerServer.ResetFramesElapsed()
 				log.Info().Msg("capturer.FramesElapsed reset")
 			}),
 
 		widgets.NewShortcut("D", "d").
 			Do(func(_ key.Name, _ key.Modifiers) {
-				if win != nil {
-					win.SetDrawEnabled(!win.DrawEnabled())
+				if window != nil {
+					window.SetDrawEnabled(!window.DrawEnabled())
 				}
 			}),
 
@@ -755,9 +759,9 @@ func moveROI(name key.Name, mod key.Modifiers) {
 		newRect = roiRect.Add(image.Pt(offset, 0))
 	}
 
-	boundaryCheck(capSrv.Bounds(), &newRect)
+	boundaryCheck(capturerServer.Bounds(), &newRect)
 	roiRect = newRect
-	matcherEng.SetROI(newRect)
+	matcherEngine.SetRoi(newRect)
 	showPosTill = time.Now().Add(time.Second * 3)
 	log.Debug().Any("roiRect", roiRect).Msg("roiRect moved")
 }
@@ -832,7 +836,7 @@ func handleInput(k key.Name, m key.Modifiers) {
 }
 
 func modWeapon(mainOrAlt bool, newSpeed string) {
-	idx := matcherEng.WeaponIndex()
+	idx := matcherEngine.WeaponIndex()
 	if idx == matcher.WEAPON_INDEX_NONE {
 		log.Warn().Msg("weapon unselected")
 		return
@@ -849,7 +853,7 @@ func modWeapon(mainOrAlt bool, newSpeed string) {
 	}
 
 	weaponsMu.RLock()
-	wps := matcherEng.Weapons()
+	wps := matcherEngine.Weapons()
 	orig := wps[idx]
 	weaponsMu.RUnlock()
 
@@ -900,7 +904,7 @@ func listWeapons() {
 	const indexLength = 3
 
 	weaponsMu.RLock()
-	wps := matcherEng.Weapons()
+	wps := matcherEngine.Weapons()
 	weaponsMu.RUnlock()
 
 	onceWeaponNameLongest.Do(func() {

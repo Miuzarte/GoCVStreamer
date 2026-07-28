@@ -11,12 +11,17 @@ import (
 
 	"github.com/Miuzarte/GoCVStreamer/capturer"
 	"github.com/Miuzarte/GoCVStreamer/fps"
+	"github.com/Miuzarte/GoCVStreamer/logger"
 	"github.com/Miuzarte/GoCVStreamer/ui"
+	"github.com/Miuzarte/GoCVStreamer/utils"
 	"github.com/getcharzp/go-vision/yolo26"
-	"github.com/rs/zerolog"
 )
 
+var log = logger.New("Detector")
+
 type Config struct {
+	Fps int
+
 	ModelPath          string
 	OnnxLibPath        string
 	ConfThresh         float32
@@ -24,40 +29,47 @@ type Config struct {
 	UseCuda            bool
 	UseTensorRT        bool
 	TensorRTPluginPath string
+
+	// https://github.com/ultralytics/ultralytics/blob/main/ultralytics/cfg/datasets/coco.yaml
+	ResultIds utils.Set[int]
 }
 
 func DefaultConfig() Config {
 	return Config{
+		Fps: 10,
+
 		ModelPath:          `B:\Git\go-vision\_weights\yolo26_weights\yolo26n.onnx`,
 		OnnxLibPath:        `B:\Git\GoCVStreamer\libs\onnxruntime-win-x64-gpu_cuda13-1.28.0\lib\onnxruntime.dll`,
-		ConfThresh:         0.25,
+		ConfThresh:         0.45,
 		InputSize:          640,
 		UseCuda:            false,
 		UseTensorRT:        true,
 		TensorRTPluginPath: `B:\Lib\TensorRT-RTX-EP-ABI-v0.3.0-cu13\onnxruntime_providers_nv_tensorrt_rtx.dll`,
+
+		ResultIds: utils.NewSet(0),
 	}
 }
 
 type Stats struct {
-	FPS    float64
-	CostMs float64
-	Count  int
+	Fps   float64
+	Cost  time.Duration
+	Count int
 }
 
 type Engine struct {
-	cfg       Config
-	detEngine *yolo26.DetEngine
-	log       zerolog.Logger
+	mu         sync.RWMutex
+	fpsCounter fps.Counter
 
-	fp       fps.Counter
-	mu       sync.RWMutex
-	Results  []yolo26.DetResult
-	Cost     time.Duration
-	DetCount int
-	lastFPS  float64
+	capturerServer *capturer.Server
+	detEngine      *yolo26.DetEngine
+	cfg            Config
+
+	// result
+	stats         Stats
+	personResults []yolo26.DetResult
 }
 
-func New(cfg Config, log zerolog.Logger) (*Engine, error) {
+func New(capturerServer *capturer.Server, cfg Config) (*Engine, error) {
 	yCfg := yolo26.Config{
 		ModelPath:          cfg.ModelPath,
 		OnnxRuntimeLibPath: cfg.OnnxLibPath,
@@ -74,10 +86,11 @@ func New(cfg Config, log zerolog.Logger) (*Engine, error) {
 	}
 
 	return &Engine{
-		cfg:       cfg,
-		detEngine: detEngine,
-		log:       log,
-		fp:        fps.NewCounter(time.Second),
+		fpsCounter: fps.NewCounter(time.Second),
+
+		cfg:            cfg,
+		capturerServer: capturerServer,
+		detEngine:      detEngine,
 	}, nil
 }
 
@@ -91,66 +104,61 @@ func (e *Engine) Detect(img image.Image) error {
 	tStart := time.Now()
 
 	results, err := e.detEngine.Predict(img)
-	e.Cost = time.Since(tStart)
+	e.stats.Cost = time.Since(tStart)
 	if err != nil {
 		return err
 	}
 
-	persons := make([]yolo26.DetResult, 0, len(results))
+	personResults := make([]yolo26.DetResult, 0, len(results))
 	for _, r := range results {
-		if r.ClassID == 0 {
-			persons = append(persons, r)
+		if e.cfg.ResultIds.Has1(r.ClassID) {
+			personResults = append(personResults, r)
 		}
 	}
 
 	e.mu.Lock()
-	e.Results = persons
-	e.DetCount = len(persons)
+	e.personResults = personResults
 	e.mu.Unlock()
 
 	return nil
 }
 
-func (e *Engine) Snapshot() (results []yolo26.DetResult, count int, cost time.Duration) {
+func (e *Engine) Snapshot() (results []yolo26.DetResult, stats Stats) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	results = make([]yolo26.DetResult, len(e.Results))
-	copy(results, e.Results)
+	results = make([]yolo26.DetResult, len(e.personResults))
+	copy(results, e.personResults)
 
-	return results, e.DetCount, e.Cost
+	return results, e.stats
 }
 
 func (e *Engine) Stats() Stats {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	return Stats{
-		FPS:    e.lastFPS,
-		CostMs: float64(e.Cost) / float64(time.Millisecond),
-		Count:  e.DetCount,
-	}
+	return e.stats
 }
 
 func (e *Engine) OffsetResults(offset image.Point) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	for i := range e.Results {
-		e.Results[i].Box = e.Results[i].Box.Add(offset)
+	for i := range e.personResults {
+		e.personResults[i].Box = e.personResults[i].Box.Add(offset)
 	}
 }
 
-func (e *Engine) Run(ctx context.Context, capSrv *capturer.Server) {
+func (e *Engine) Run(ctx context.Context) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
-	const interval = time.Second / 15
+	localImg := image.NewRGBA(e.capturerServer.Bounds())
+	var lastFrameId uint64
+
+	interval := time.Second / time.Duration(e.cfg.Fps)
+
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-
-	localImg := image.NewRGBA(capSrv.Bounds())
-	var lastFrameID uint64
-	var lastFPS float64
 
 	for {
 		select {
@@ -159,38 +167,36 @@ func (e *Engine) Run(ctx context.Context, capSrv *capturer.Server) {
 		case <-ticker.C:
 		}
 
-		capSrv.Request(capturer.TagYOLO, interval)
+		e.capturerServer.Request(capturer.TagYOLO, interval)
 
-		id := capSrv.ReadFrameID()
-		if id == lastFrameID {
+		id := e.capturerServer.ReadFrameId()
+		if id == lastFrameId {
 			continue
 		}
-		lastFrameID = id
+		lastFrameId = id
 
-		srcRGBA := capSrv.ReadRGBA()
-		if srcRGBA == nil {
+		captureRgba := e.capturerServer.ReadRgba()
+		if captureRgba == nil {
 			continue
 		}
-		copy(localImg.Pix, srcRGBA.Pix)
+		copy(localImg.Pix, captureRgba.Pix)
 
 		tStart := time.Now()
 		err := e.Detect(localImg)
 		if err != nil {
-			e.log.Warn().Err(err).Msg("person detection failed")
+			log.Warn().
+				Err(err).
+				Msg("yolo detection failed")
 			continue
 		}
-		e.Cost = time.Since(tStart)
+		e.stats.Cost = time.Since(tStart)
 
-		lastFPS, _ = e.fp.Count()
-
-		e.mu.Lock()
-		e.lastFPS = lastFPS
-		e.mu.Unlock()
+		e.stats.Fps, _ = e.fpsCounter.Count()
 	}
 }
 
 func (e *Engine) Draw(gtx layout.Context, s ui.DScale) {
-	results, _, _ := e.Snapshot()
+	results, _ := e.Snapshot()
 	for _, det := range results {
 		rect := s.Rect(det.Box)
 		ui.DrawBorder(gtx, ui.ColorGreen.NRGBA(), rect)

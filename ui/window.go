@@ -98,9 +98,12 @@ func (w *Window) Run(ctx context.Context) {
 		switch e := w.app.Event().(type) {
 		case app.DestroyEvent:
 			if e.Err != nil {
-				log.Error().Err(e.Err).Msg("window error")
+				log.Error().
+					Err(e.Err).
+					Msg("window error")
 			} else {
-				log.Debug().Msg("window closed normally")
+				log.Debug().
+					Msg("window closed normally")
 			}
 			return
 
@@ -143,9 +146,16 @@ func (w *Window) drawScreen(gtx layout.Context) {
 
 	scale := min(float32(gtxW)/float32(imgW), float32(gtxH)/float32(imgH))
 
-	defer op.Offset(image.Pt((gtxW-int(float32(imgW)*scale))/2, (gtxH-int(float32(imgH)*scale))/2)).Push(gtx.Ops).Pop()
+	// 实际绘制大小
+	drawW := int(float32(imgW) * scale)
+	drawH := int(float32(imgH) * scale)
+
+	// 居中
+	defer op.Offset(image.Pt((gtxW-drawW)/2, (gtxH-drawH)/2)).Push(gtx.Ops).Pop()
+	// 缩放
 	defer op.Affine(f32.AffineId().Scale(f32.Pt(0, 0), f32.Pt(scale, scale))).Push(gtx.Ops).Pop()
 
+	// 绘制
 	paint.NewImageOp(w.screenImg).Add(gtx.Ops)
 	paint.PaintOp{}.Add(gtx.Ops)
 }

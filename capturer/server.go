@@ -23,14 +23,10 @@ type Stats struct {
 	FrameCount int
 }
 
-func (s Stats) CostMs() float64 {
-	return float64(s.Cost) / float64(time.Millisecond)
-}
-
 type Frame struct {
-	RGBA *image.RGBA
-	Mat  gocv.Mat
-	ID   uint64
+	rgba *image.RGBA
+	mat  gocv.Mat
+	id   uint64
 }
 
 type RequestTag int
@@ -53,10 +49,10 @@ type Server struct {
 	frame      Frame
 	screenRGBA *image.RGBA
 
-	req         chan CaptureReq
-	stats       Stats
-	onFrame     func()
-	cvtCode     gocv.ColorConversionCode
+	req     chan CaptureReq
+	stats   Stats
+	onFrame func()
+	cvtCode gocv.ColorConversionCode
 
 	lastTag     RequestTag
 	lastCapture time.Time
@@ -71,7 +67,7 @@ func NewServer(d *DxgiDesktopDuplicator, mode gocv.IMReadFlag, onFrame func()) *
 	return &Server{
 		duplicator: d,
 		fp:         fps.NewCounter(time.Second),
-		frame:      Frame{Mat: gocv.NewMat()},
+		frame:      Frame{mat: gocv.NewMat()},
 		screenRGBA: image.NewRGBA(bounds),
 		req:        make(chan CaptureReq, 2),
 		onFrame:    onFrame,
@@ -90,22 +86,22 @@ func (s *Server) Request(tag RequestTag, interval time.Duration) {
 	}
 }
 
-func (s *Server) ReadRGBA() *image.RGBA {
+func (s *Server) ReadRgba() *image.RGBA {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.frame.RGBA
+	return s.frame.rgba
 }
 
 func (s *Server) ReadMat() gocv.Mat {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.frame.Mat
+	return s.frame.mat
 }
 
-func (s *Server) ReadFrameID() uint64 {
+func (s *Server) ReadFrameId() uint64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.frame.ID
+	return s.frame.id
 }
 
 func (s *Server) ReadScreen() *image.RGBA {
@@ -160,11 +156,11 @@ func (s *Server) Run(ctx context.Context) {
 		}
 
 		s.mu.Lock()
-		s.frame.RGBA = rawRGBA
-		s.frame.ID++
+		s.frame.rgba = rawRGBA
+		s.frame.id++
 		copy(s.screenRGBA.Pix, rawRGBA.Pix)
 
-		err = s.imageToMat(rawRGBA, &s.frame.Mat)
+		err = s.imageToMat(rawRGBA, &s.frame.mat)
 		if err != nil {
 			log.Error().Err(err).Msg("failed to convert image to mat")
 			s.mu.Unlock()
@@ -183,7 +179,7 @@ func (s *Server) Run(ctx context.Context) {
 }
 
 func (s *Server) Close() error {
-	s.frame.Mat.Close()
+	s.frame.mat.Close()
 	return s.duplicator.Close()
 }
 
