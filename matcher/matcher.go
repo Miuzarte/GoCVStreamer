@@ -14,6 +14,7 @@ import (
 	"github.com/Miuzarte/GoCVStreamer/capturer"
 	"github.com/Miuzarte/GoCVStreamer/fps"
 	"github.com/Miuzarte/GoCVStreamer/logger"
+	"github.com/Miuzarte/GoCVStreamer/timing"
 	"github.com/Miuzarte/GoCVStreamer/ui"
 	w "github.com/Miuzarte/GoCVStreamer/weapon"
 	ws "github.com/Miuzarte/GoCVStreamer/weapons"
@@ -79,6 +80,8 @@ type Engine struct {
 	stats    Stats
 	result   MatchResult
 	resultCh chan int
+
+	diag *timing.Diag
 }
 
 func New(capturerServer *capturer.Server, cfg Config) *Engine {
@@ -91,6 +94,8 @@ func New(capturerServer *capturer.Server, cfg Config) *Engine {
 		lastSlot: w.Slot(w.SLOT_UNDEFINED),
 
 		resultCh: make(chan int, 1),
+
+		diag: timing.NewDiag("Match"),
 	}
 }
 
@@ -235,6 +240,7 @@ func (e *Engine) Run(ctx context.Context) {
 
 		idx, matched, found := e.matchWeapon(captureRoi, slotFilter)
 		e.stats.Cost = time.Since(tStart)
+		e.diag.Observe(time.Since(tStart), log)
 		e.stats.Matched = matched
 		captureRoi.Close()
 

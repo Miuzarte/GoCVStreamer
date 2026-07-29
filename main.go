@@ -27,6 +27,7 @@ import (
 	"github.com/Miuzarte/GoCVStreamer/capturer"
 	cwg "github.com/Miuzarte/GoCVStreamer/contextWaitGroup"
 	"github.com/Miuzarte/GoCVStreamer/detector"
+	"github.com/Miuzarte/GoCVStreamer/keystate"
 	"github.com/Miuzarte/GoCVStreamer/logger"
 	"github.com/Miuzarte/GoCVStreamer/matcher"
 	"github.com/Miuzarte/GoCVStreamer/mouse"
@@ -50,8 +51,9 @@ var (
 	nohttp      = flag.Bool("nohttp", false, "disable HTTP metrics server")
 	noyolo      = flag.Bool("noyolo", false, "disable YOLO person detection")
 	autodisplay = flag.Bool("autodisplay", false, "skip display selection, auto-select largest")
+	noopencv    = flag.Bool("noopencv", false, "disable OpenCV template matching")
+	game        = flag.String("game", "", "game mode: r6s, cs2")
 )
-
 var log = logger.New("Streamer")
 
 const (
@@ -131,7 +133,9 @@ func init() {
 
 	selectDisplay()
 
-	loadTemplates()
+	if !*noopencv {
+		loadTemplates()
+	}
 }
 
 func selectDisplay() {
@@ -157,7 +161,8 @@ func selectDisplay() {
 	ui.InitTheme()
 
 	cfg := capturer.Config{
-		MinFps: 1,
+		MinFps:        1,
+		DisableOpenCV: *noopencv,
 	}
 	capturerServer = capturer.NewServer(duplicator, cfg, MATCHING_MODE, func() {
 		if window != nil && !*nogui {
@@ -282,23 +287,25 @@ func main() {
 		})
 	}
 
-	matcherCfg := matcher.Config{
-		Fps:              5,
-		FpsIdle:          2,
-		DropIdleDuration: time.Second * 5,
+	if !*noopencv {
+		matcherCfg := matcher.Config{
+			Fps:              5,
+			FpsIdle:          2,
+			DropIdleDuration: time.Second * 5,
 
-		Weapons:   weapons,
-		WeaponsMu: &weaponsMu,
-		RoiRect:   roiRect,
-		Debugging: debugging,
-	}
-	matcherEngine = matcher.New(capturerServer, matcherCfg)
+			Weapons:   weapons,
+			WeaponsMu: &weaponsMu,
+			RoiRect:   roiRect,
+			Debugging: debugging,
+		}
+		matcherEngine = matcher.New(capturerServer, matcherCfg)
 
-	clicker := mouse.NewClicker(cwg.Ctx)
-	recoilCfg := recoil.Config{
-		Debugging: debugging,
+		clicker := mouse.NewClicker(cwg.Ctx)
+		recoilCfg := recoil.Config{
+			Debugging: debugging,
+		}
+		recoilEngine = recoil.New(clicker, recoilCfg)
 	}
-	recoilEngine = recoil.New(clicker, recoilCfg)
 
 	if !*noyolo {
 		detectorEngine = initDetector()
@@ -309,7 +316,9 @@ func main() {
 	}
 
 	if detectorEngine != nil {
-		detectorEngine.SetIdleChecker(func() bool { return matcherEngine.InIdle() })
+		if matcherEngine != nil {
+			detectorEngine.SetIdleChecker(func() bool { return matcherEngine.InIdle() })
+		}
 
 		rawTracker, err := mouse.StartRawInput()
 		if err != nil {
@@ -319,6 +328,24 @@ func main() {
 		} else {
 			defer rawTracker.Stop()
 			assistCfg := assist.DefaultConfig()
+			switch *game {
+			case "r6s":
+				assistCfg.Speed = 8
+				assistCfg.InnerRatio = 0.5
+				assistCfg.RequireKeys = []keystate.KeyCode{
+					keystate.VK_RBUTTON,
+				}
+				assistCfg.RequireMouseMove = true
+			case "cs2":
+				assistCfg.Speed = 2
+				assistCfg.InnerRatio = 0.25
+				assistCfg.RequireKeys = []keystate.KeyCode{
+					keystate.VK_LBUTTON,
+					// keystate.VK_XBUTTON1, // backward
+					keystate.VK_XBUTTON2, // forward
+				}
+				assistCfg.RequireMouseMove = false
+			}
 			assistEngine = assist.New(assistCfg, detectorEngine, capturerServer.Bounds())
 		}
 	}
@@ -335,7 +362,9 @@ func main() {
 			inputMainOrAlt: &inputMainOrAlt,
 			inputBuf:       &inputBuf,
 		})
-		window.Register(matcherEngine)
+		if matcherEngine != nil {
+			window.Register(matcherEngine)
+		}
 		if detectorEngine != nil {
 			window.Register(detectorEngine)
 		}
@@ -346,7 +375,9 @@ func main() {
 	}
 
 	cwg.Go(capturerServer.Run)
-	cwg.Go(matcherEngine.Run)
+	if matcherEngine != nil {
+		cwg.Go(matcherEngine.Run)
+	}
 
 	if detectorEngine != nil {
 		cwg.Go(func(ctx context.Context) {
@@ -354,7 +385,9 @@ func main() {
 		})
 	}
 
-	cwg.Go(r6sLoop)
+	if matcherEngine != nil {
+		cwg.Go(r6sLoop)
+	}
 	cwg.Go(cpuMeasureLoop)
 	cwg.Go(tmplWatchLoop)
 

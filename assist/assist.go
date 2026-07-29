@@ -26,7 +26,7 @@ type Config struct {
 	Vertical         bool
 	Speed            float64
 	InnerRatio       float64
-	RequireRButton   bool
+	RequireKeys      []keystate.KeyCode
 	RequireMouseMove bool
 }
 
@@ -37,7 +37,7 @@ func DefaultConfig() Config {
 		Vertical:         false,
 		Speed:            8.0,
 		InnerRatio:       0.5,
-		RequireRButton:   true,
+		RequireKeys:      []keystate.KeyCode{keystate.VK_RBUTTON},
 		RequireMouseMove: true,
 	}
 }
@@ -61,58 +61,6 @@ func New(cfg Config, det *detector.Engine, bounds image.Rectangle) *Engine {
 		detector: det,
 		keys:     keystate.NewTracker(),
 	}
-}
-
-func (e *Engine) Speed() float64 {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	return e.cfg.Speed
-}
-
-func (e *Engine) Enabled() bool {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	return e.cfg.Enabled
-}
-
-func (e *Engine) Horizontal() bool {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	return e.cfg.Horizontal
-}
-
-func (e *Engine) Vertical() bool {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	return e.cfg.Vertical
-}
-
-func (e *Engine) SetEnabled(v bool) {
-	e.mu.Lock()
-	e.cfg.Enabled = v
-	e.mu.Unlock()
-	log.Info().Bool("enabled", v).Msg("aim assist toggled")
-}
-
-func (e *Engine) SetSpeed(v float64) {
-	e.mu.Lock()
-	e.cfg.Speed = math.Max(0.5, v)
-	e.mu.Unlock()
-	log.Info().Float64("speed", e.cfg.Speed).Msg("aim assist speed changed")
-}
-
-func (e *Engine) SetHorizontal(v bool) {
-	e.mu.Lock()
-	e.cfg.Horizontal = v
-	e.mu.Unlock()
-	log.Info().Bool("horizontal", v).Msg("aim assist mode changed")
-}
-
-func (e *Engine) SetVertical(v bool) {
-	e.mu.Lock()
-	e.cfg.Vertical = v
-	e.mu.Unlock()
-	log.Info().Bool("vertical", v).Msg("aim assist mode changed")
 }
 
 func (e *Engine) DisplayState(sb *strings.Builder) {
@@ -201,12 +149,21 @@ func (e *Engine) Tick() {
 		return
 	}
 
-	if cfg.RequireRButton && !keystate.IsDown(keystate.VK_RBUTTON) {
-		e.mu.Lock()
-		e.isActive = false
-		e.targetBox = image.Rectangle{}
-		e.mu.Unlock()
-		return
+	if len(cfg.RequireKeys) > 0 {
+		anyDown := false
+		for _, key := range cfg.RequireKeys {
+			if keystate.IsDown(key) {
+				anyDown = true
+				break
+			}
+		}
+		if !anyDown {
+			e.mu.Lock()
+			e.isActive = false
+			e.targetBox = image.Rectangle{}
+			e.mu.Unlock()
+			return
+		}
 	}
 
 	if cfg.RequireMouseMove && !mouse.IsMoving(50*time.Millisecond) {

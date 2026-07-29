@@ -10,12 +10,14 @@ import (
 	"time"
 
 	"github.com/Miuzarte/GoCVStreamer/fps"
+	"github.com/Miuzarte/GoCVStreamer/timing"
 	"github.com/kirides/go-d3d/outputduplication"
 	"gocv.io/x/gocv"
 )
 
 type Config struct {
-	MinFps int
+	MinFps        int
+	DisableOpenCV bool
 }
 
 var imageToMatWarnOnce sync.Once
@@ -49,6 +51,11 @@ type Server struct {
 	targetFps    int
 	targetExpiry time.Time
 	targetMu     sync.Mutex
+
+	noOpenCV bool
+
+	diagGetImage   *timing.Diag
+	diagImageToMat *timing.Diag
 }
 
 func NewServer(d *DxgiDesktopDuplicator, cfg Config, mode gocv.IMReadFlag, onFrame func()) *Server {
@@ -60,16 +67,23 @@ func NewServer(d *DxgiDesktopDuplicator, cfg Config, mode gocv.IMReadFlag, onFra
 	if cfg.MinFps <= 0 {
 		cfg.MinFps = 1
 	}
-	return &Server{
+	s := &Server{
 		duplicator: d,
 		fp:         fps.NewCounter(time.Second),
-		frame:      Frame{mat: gocv.NewMat()},
 		screenRGBA: image.NewRGBA(bounds),
 		onFrame:    onFrame,
 		cvtCode:    cvtCode,
 		cfg:        cfg,
 		targetFps:  cfg.MinFps,
+		noOpenCV:   cfg.DisableOpenCV,
+
+		diagGetImage:   timing.NewDiag("GetImage"),
+		diagImageToMat: timing.NewDiag("ImageToMat"),
 	}
+	if !cfg.DisableOpenCV {
+		s.frame.mat = gocv.NewMat()
+	}
+	return s
 }
 
 func (s *Server) Bounds() image.Rectangle {
@@ -79,7 +93,7 @@ func (s *Server) Bounds() image.Rectangle {
 func (s *Server) RaiseCeiling(fps int) {
 	s.targetMu.Lock()
 	defer s.targetMu.Unlock()
-	if fps > s.targetFps {
+	if fps >= s.targetFps {
 		s.targetFps = fps
 		s.targetExpiry = time.Now().Add(3 * time.Second)
 	}
@@ -156,17 +170,22 @@ func (s *Server) Run(ctx context.Context) {
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
+		s.diagGetImage.Observe(time.Since(tStart), log)
 
 		s.mu.Lock()
 		s.frame.rgba = rawRGBA
 		s.frame.id++
 		copy(s.screenRGBA.Pix, rawRGBA.Pix)
 
-		err = s.imageToMat(rawRGBA, &s.frame.mat)
-		if err != nil {
-			log.Error().Err(err).Msg("failed to convert image to mat")
-			s.mu.Unlock()
-			continue
+		if !s.noOpenCV {
+			tImg := time.Now()
+			err = s.imageToMat(rawRGBA, &s.frame.mat)
+			if err != nil {
+				log.Error().Err(err).Msg("failed to convert image to mat")
+				s.mu.Unlock()
+				continue
+			}
+			s.diagImageToMat.Observe(time.Since(tImg), log)
 		}
 
 		s.stats.Cost = time.Since(tStart)
@@ -186,7 +205,9 @@ func (s *Server) Run(ctx context.Context) {
 }
 
 func (s *Server) Close() error {
-	s.frame.mat.Close()
+	if !s.noOpenCV {
+		s.frame.mat.Close()
+	}
 	return s.duplicator.Close()
 }
 

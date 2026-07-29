@@ -14,6 +14,7 @@ import (
 	"github.com/Miuzarte/GoCVStreamer/fps"
 	"github.com/Miuzarte/GoCVStreamer/libyuv"
 	"github.com/Miuzarte/GoCVStreamer/logger"
+	"github.com/Miuzarte/GoCVStreamer/timing"
 	"github.com/Miuzarte/GoCVStreamer/ui"
 	"github.com/Miuzarte/GoCVStreamer/utils"
 	"github.com/getcharzp/go-vision/yolo26"
@@ -73,6 +74,7 @@ type Engine struct {
 	personResults []yolo26.DetResult
 
 	idleCheck func() bool
+	diag      *timing.Diag
 }
 
 func New(capturerServer *capturer.Server, cfg Config) (*Engine, error) {
@@ -97,6 +99,8 @@ func New(capturerServer *capturer.Server, cfg Config) (*Engine, error) {
 		cfg:            cfg,
 		capturerServer: capturerServer,
 		detEngine:      detEngine,
+
+		diag: timing.NewDiag("Detect"),
 	}, nil
 }
 
@@ -245,6 +249,7 @@ func (e *Engine) Run(ctx context.Context) {
 			time.Sleep(time.Millisecond * 100)
 			continue
 		}
+		e.diag.Observe(e.stats.Cost, log)
 		if origW != e.cfg.InputSize || origH != e.cfg.InputSize {
 			e.ScaleResults(float64(origW)/float64(e.cfg.InputSize), float64(origH)/float64(e.cfg.InputSize))
 		}
