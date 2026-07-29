@@ -53,12 +53,13 @@ var (
 	noyolo      = flag.Bool("noyolo", false, "disable YOLO person detection")
 	autodisplay = flag.Bool("autodisplay", false, "skip display selection, auto-select largest")
 	noopencv    = flag.Bool("noopencv", false, "disable OpenCV template matching")
-	game        = flag.String("game", "", "game mode: r6s, cs2")
+	game        = flag.String("game", "r6s", "game mode: r6s, cs2")
 	source      = flag.String("source", "dxgi", "capture source: dxgi, obs")
 	obsIndex    = flag.Int("obsindex", 0, "OBS Virtual Camera device index")
 	obsWidth    = flag.Int("obswidth", 0, "OBS Virtual Camera width (0=default)")
 	obsHeight   = flag.Int("obsheight", 0, "OBS Virtual Camera height (0=default)")
 )
+
 var log = logger.New("Streamer")
 
 const (

@@ -160,9 +160,12 @@ func (s *Server) Run(ctx context.Context) {
 		fps := s.targetFps
 		s.targetMu.Unlock()
 
+		interval := time.Second / time.Duration(fps)
+		timeoutMs := max(1, interval.Milliseconds())
+
 		tStart := time.Now()
 
-		err := s.source.GetImage(rawRGBA)
+		err := s.source.GetImageTimeout(rawRGBA, uint(timeoutMs))
 		if err == outputduplication.ErrNoImageYet {
 			continue
 		}
@@ -208,7 +211,6 @@ func (s *Server) Run(ctx context.Context) {
 			s.onFrame()
 		}
 
-		interval := time.Second / time.Duration(fps)
 		if elapsed := time.Since(tStart); elapsed < interval {
 			time.Sleep(interval - elapsed)
 		}

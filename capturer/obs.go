@@ -73,6 +73,10 @@ func (o *ObsCameraSource) GetImage(img *image.RGBA) error {
 	return nil
 }
 
+func (o *ObsCameraSource) GetImageTimeout(img *image.RGBA, timeoutMs uint) error {
+	return o.GetImage(img)
+}
+
 func (o *ObsCameraSource) ProvideMat(dst *gocv.Mat) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
