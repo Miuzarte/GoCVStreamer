@@ -81,8 +81,8 @@ func (s *Server) RaiseCeiling(fps int) {
 	defer s.targetMu.Unlock()
 	if fps > s.targetFps {
 		s.targetFps = fps
+		s.targetExpiry = time.Now().Add(3 * time.Second)
 	}
-	s.targetExpiry = time.Now().Add(3 * time.Second)
 }
 
 func (s *Server) ReadRgba() *image.RGBA {
