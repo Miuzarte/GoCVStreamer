@@ -141,11 +141,7 @@ func (e *Engine) Detect(img image.Image) error {
 func (e *Engine) Snapshot() (results []yolo26.DetResult, stats Stats) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-
-	results = make([]yolo26.DetResult, len(e.personResults))
-	copy(results, e.personResults)
-
-	return results, e.stats
+	return e.personResults, e.stats
 }
 
 func (e *Engine) Stats() Stats {
@@ -200,6 +196,9 @@ func (e *Engine) Run(ctx context.Context) {
 			cropOffset = image.Pt((bounds.Dx()-cropSize)/2, (bounds.Dy()-cropSize)/2)
 		}
 	}
+
+	cropImg := image.NewRGBA(image.Rect(0, 0, cropSize, cropSize))
+	resizeDst := image.NewRGBA(image.Rect(0, 0, e.cfg.InputSize, e.cfg.InputSize))
 
 	interval := time.Second / time.Duration(e.cfg.Fps)
 	intervalIdle := time.Duration(math.MaxInt64)
@@ -273,15 +272,15 @@ func (e *Engine) Run(ctx context.Context) {
 		}
 		copy(localImg.Pix, captureRgba.Pix)
 
-		var detectImg image.Image = localImg
-		if cropNeeded {
-			cropImg := image.NewRGBA(image.Rect(0, 0, cropSize, cropSize))
-			draw.Draw(cropImg, cropImg.Bounds(), localImg, cropOffset, draw.Src)
-			detectImg = cropImg
-		}
-		origW := detectImg.Bounds().Dx()
-		origH := detectImg.Bounds().Dy()
-		detectImg = libyuv.ResizeRGBA(detectImg.(*image.RGBA), e.cfg.InputSize, e.cfg.InputSize)
+	var detectImg image.Image = localImg
+	if cropNeeded {
+		draw.Draw(cropImg, cropImg.Bounds(), localImg, cropOffset, draw.Src)
+		detectImg = cropImg
+	}
+	origW := detectImg.Bounds().Dx()
+	origH := detectImg.Bounds().Dy()
+	libyuv.ResizeRGBAInto(resizeDst, detectImg.(*image.RGBA), e.cfg.InputSize, e.cfg.InputSize)
+	detectImg = resizeDst
 
 		err := e.Detect(detectImg)
 		if err != nil {
