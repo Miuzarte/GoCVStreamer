@@ -53,6 +53,10 @@ var (
 	autodisplay = flag.Bool("autodisplay", false, "skip display selection, auto-select largest")
 	noopencv    = flag.Bool("noopencv", false, "disable OpenCV template matching")
 	game        = flag.String("game", "", "game mode: r6s, cs2")
+	source      = flag.String("source", "dxgi", "capture source: dxgi, obs")
+	obsIndex    = flag.Int("obsindex", 0, "OBS Virtual Camera device index")
+	obsWidth    = flag.Int("obswidth", 0, "OBS Virtual Camera width (0=default)")
+	obsHeight   = flag.Int("obsheight", 0, "OBS Virtual Camera height (0=default)")
 )
 var log = logger.New("Streamer")
 
@@ -139,22 +143,29 @@ func init() {
 }
 
 func selectDisplay() {
-	displayIndex, err := selectDisplayInteractive()
+	var src capturer.Source
+	var err error
+
+	switch *source {
+	case "obs":
+		src, err = capturer.NewObsCamera(*obsIndex, *obsWidth, *obsHeight)
+	default:
+		var displayIndex int
+		displayIndex, err = selectDisplayInteractive()
+		if err != nil {
+			log.Panic().Err(err).Msg("failed to select display")
+		}
+		src, err = capturer.New(displayIndex)
+	}
 	if err != nil {
-		log.Panic().Err(err).Msg("failed to select display")
+		log.Panic().Err(err).Msg("failed to create capture source")
 	}
 
-	duplicator, err := capturer.New(displayIndex)
-	if err != nil {
-		log.Panic().Err(err).Msg("failed to create capturer")
-	}
-
-	bounds := duplicator.Bounds()
+	bounds := src.Bounds()
 	log.Info().
-		Int("displayIndex", displayIndex).
 		Int("width", bounds.Dx()).
 		Int("height", bounds.Dy()).
-		Msg("using display")
+		Msg("using capture source")
 
 	roiRect = image.Rectangle{roiRectPos, roiRectPos.Add(roiRectSize)}
 
@@ -164,7 +175,7 @@ func selectDisplay() {
 		MinFps:        1,
 		DisableOpenCV: *noopencv,
 	}
-	capturerServer = capturer.NewServer(duplicator, cfg, MATCHING_MODE, func() {
+	capturerServer = capturer.NewServer(src, cfg, MATCHING_MODE, func() {
 		if window != nil && !*nogui {
 			window.App().Invalidate()
 		}

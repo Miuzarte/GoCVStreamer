@@ -10,12 +10,13 @@ import (
 	"github.com/kirides/go-d3d/d3d11"
 	"github.com/kirides/go-d3d/outputduplication"
 	"github.com/kirides/go-d3d/win"
+	"gocv.io/x/gocv"
 )
 
 var log = logger.New("Capturer")
 
 type DxgiDesktopDuplicator struct {
-	FramesElapsed int
+	framesElapsed int
 
 	mu           sync.Mutex
 	displayIndex int
@@ -100,10 +101,22 @@ func (ss *DxgiDesktopDuplicator) Bounds() image.Rectangle {
 	return ss.screenBounds
 }
 
+func (ss *DxgiDesktopDuplicator) FramesElapsed() int {
+	return ss.framesElapsed
+}
+
+func (ss *DxgiDesktopDuplicator) ResetFramesElapsed() {
+	ss.framesElapsed = 0
+}
+
 func (ss *DxgiDesktopDuplicator) GetImage(img *image.RGBA) error {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
-	return ss.getImage(img)
+	return ss.getImageTimeout(img, 10)
+}
+
+func (ss *DxgiDesktopDuplicator) ProvideMat(dst *gocv.Mat) bool {
+	return false
 }
 
 func (ss *DxgiDesktopDuplicator) GetImageTimeout(img *image.RGBA, timeoutMs uint) error {
@@ -112,14 +125,10 @@ func (ss *DxgiDesktopDuplicator) GetImageTimeout(img *image.RGBA, timeoutMs uint
 	return ss.getImageTimeout(img, timeoutMs)
 }
 
-func (ss *DxgiDesktopDuplicator) getImage(img *image.RGBA) error {
-	return ss.getImageTimeout(img, 0)
-}
-
 func (ss *DxgiDesktopDuplicator) getImageTimeout(img *image.RGBA, timeoutMs uint) error {
 	err := ss.ddup.GetImage(img, timeoutMs)
 	if err == nil {
-		ss.FramesElapsed++
+		ss.framesElapsed++
 	} else {
 		if err == outputduplication.ErrNoImageYet {
 			return err
@@ -130,9 +139,8 @@ func (ss *DxgiDesktopDuplicator) getImageTimeout(img *image.RGBA, timeoutMs uint
 		err = ss.init()
 		if err != nil {
 			return err
-		} else {
-			return ss.getImage(img)
 		}
+		return ss.getImageTimeout(img, timeoutMs)
 	}
 	return err
 }

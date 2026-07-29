@@ -11,6 +11,7 @@ type Diag struct {
 	alpha  float64
 	avgMs  float64
 	thresh float64
+	minMs  float64
 	warmup int
 	count  int
 
@@ -23,6 +24,7 @@ func NewDiag(name string) *Diag {
 		name:          name,
 		alpha:         0.9,
 		thresh:        3.0,
+		minMs:         10.0,
 		warmup:        10,
 		traceInterval: time.Second,
 	}
@@ -39,6 +41,10 @@ func (d *Diag) Observe(dur time.Duration, log zerolog.Logger) {
 	}
 
 	if d.count <= d.warmup {
+		return
+	}
+
+	if ms < d.minMs {
 		return
 	}
 

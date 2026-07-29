@@ -36,8 +36,8 @@ type Frame struct {
 }
 
 type Server struct {
-	duplicator *DxgiDesktopDuplicator
-	fp         fps.Counter
+	source Source
+	fp     fps.Counter
 
 	mu         sync.RWMutex
 	frame      Frame
@@ -58,8 +58,8 @@ type Server struct {
 	diagImageToMat *timing.Diag
 }
 
-func NewServer(d *DxgiDesktopDuplicator, cfg Config, mode gocv.IMReadFlag, onFrame func()) *Server {
-	bounds := d.Bounds()
+func NewServer(src Source, cfg Config, mode gocv.IMReadFlag, onFrame func()) *Server {
+	bounds := src.Bounds()
 	cvtCode := gocv.ColorRGBAToBGR
 	if mode == gocv.IMReadGrayScale {
 		cvtCode = gocv.ColorRGBAToGray
@@ -68,7 +68,7 @@ func NewServer(d *DxgiDesktopDuplicator, cfg Config, mode gocv.IMReadFlag, onFra
 		cfg.MinFps = 1
 	}
 	s := &Server{
-		duplicator: d,
+		source:     src,
 		fp:         fps.NewCounter(time.Second),
 		screenRGBA: image.NewRGBA(bounds),
 		onFrame:    onFrame,
@@ -87,7 +87,7 @@ func NewServer(d *DxgiDesktopDuplicator, cfg Config, mode gocv.IMReadFlag, onFra
 }
 
 func (s *Server) Bounds() image.Rectangle {
-	return s.duplicator.Bounds()
+	return s.source.Bounds()
 }
 
 func (s *Server) RaiseCeiling(fps int) {
@@ -130,18 +130,18 @@ func (s *Server) Stats() Stats {
 }
 
 func (s *Server) FramesElapsed() int {
-	return s.duplicator.FramesElapsed
+	return s.source.FramesElapsed()
 }
 
 func (s *Server) ResetFramesElapsed() {
-	s.duplicator.FramesElapsed = 0
+	s.source.ResetFramesElapsed()
 }
 
 func (s *Server) Run(ctx context.Context) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
-	rawRGBA := image.NewRGBA(s.duplicator.Bounds())
+	rawRGBA := image.NewRGBA(s.source.Bounds())
 
 	for {
 		select {
@@ -159,7 +159,7 @@ func (s *Server) Run(ctx context.Context) {
 
 		tStart := time.Now()
 
-		err := s.duplicator.GetImageTimeout(rawRGBA, 10)
+		err := s.source.GetImage(rawRGBA)
 		if err == outputduplication.ErrNoImageYet {
 			continue
 		}
@@ -179,18 +179,26 @@ func (s *Server) Run(ctx context.Context) {
 
 		if !s.noOpenCV {
 			tImg := time.Now()
-			err = s.imageToMat(rawRGBA, &s.frame.mat)
-			if err != nil {
-				log.Error().Err(err).Msg("failed to convert image to mat")
-				s.mu.Unlock()
-				continue
+			if s.source.ProvideMat(&s.frame.mat) {
+				if s.cvtCode == gocv.ColorRGBAToGray {
+					tmp := s.frame.mat.Clone()
+					gocv.CvtColor(tmp, &s.frame.mat, gocv.ColorBGRToGray)
+					tmp.Close()
+				}
+			} else {
+				err = s.imageToMat(rawRGBA, &s.frame.mat)
+				if err != nil {
+					log.Error().Err(err).Msg("failed to convert image to mat")
+					s.mu.Unlock()
+					continue
+				}
 			}
 			s.diagImageToMat.Observe(time.Since(tImg), log)
 		}
 
 		s.stats.Cost = time.Since(tStart)
 		s.stats.FPS, s.stats.FrameTime = s.fp.Count()
-		s.stats.FrameCount = s.duplicator.FramesElapsed
+		s.stats.FrameCount = s.source.FramesElapsed()
 		s.mu.Unlock()
 
 		if s.onFrame != nil {
@@ -208,7 +216,7 @@ func (s *Server) Close() error {
 	if !s.noOpenCV {
 		s.frame.mat.Close()
 	}
-	return s.duplicator.Close()
+	return s.source.Close()
 }
 
 func (s *Server) imageToMat(img image.Image, dst *gocv.Mat) (err error) {
