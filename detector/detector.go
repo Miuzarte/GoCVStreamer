@@ -76,6 +76,7 @@ type Engine struct {
 	// result
 	stats         Stats
 	personResults []yolo26.DetResult
+	personBuf     []yolo26.DetResult
 
 	idleCheck func() bool
 	diag      *timing.Diag
@@ -124,15 +125,14 @@ func (e *Engine) Detect(img image.Image) error {
 		return err
 	}
 
-	personResults := make([]yolo26.DetResult, 0, len(results))
+	e.mu.Lock()
+	e.personBuf = e.personBuf[:0]
 	for _, r := range results {
 		if e.cfg.ResultIds.Has1(r.ClassID) {
-			personResults = append(personResults, r)
+			e.personBuf = append(e.personBuf, r)
 		}
 	}
-
-	e.mu.Lock()
-	e.personResults = personResults
+	e.personResults = e.personBuf
 	e.mu.Unlock()
 
 	return nil
@@ -270,12 +270,14 @@ func (e *Engine) Run(ctx context.Context) {
 		if captureRgba == nil {
 			continue
 		}
-		copy(localImg.Pix, captureRgba.Pix)
 
-	var detectImg image.Image = localImg
+	var detectImg image.Image
 	if cropNeeded {
-		draw.Draw(cropImg, cropImg.Bounds(), localImg, cropOffset, draw.Src)
+		draw.Draw(cropImg, cropImg.Bounds(), captureRgba, cropOffset, draw.Src)
 		detectImg = cropImg
+	} else {
+		copy(localImg.Pix, captureRgba.Pix)
+		detectImg = localImg
 	}
 	origW := detectImg.Bounds().Dx()
 	origH := detectImg.Bounds().Dy()

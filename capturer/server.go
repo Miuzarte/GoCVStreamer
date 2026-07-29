@@ -54,6 +54,8 @@ type Server struct {
 
 	noOpenCV bool
 
+	frameMatRGBAInter gocv.Mat
+
 	diagGetImage   *timing.Diag
 	diagImageToMat *timing.Diag
 }
@@ -82,6 +84,7 @@ func NewServer(src Source, cfg Config, mode gocv.IMReadFlag, onFrame func()) *Se
 	}
 	if !cfg.DisableOpenCV {
 		s.frame.mat = gocv.NewMat()
+		s.frameMatRGBAInter = gocv.NewMatWithSize(bounds.Dy(), bounds.Dx(), gocv.MatTypeCV8UC4)
 	}
 	return s
 }
@@ -181,7 +184,6 @@ func (s *Server) Run(ctx context.Context) {
 		s.mu.Lock()
 		s.frame.rgba = rawRGBA
 		s.frame.id++
-		copy(s.screenRGBA.Pix, rawRGBA.Pix)
 
 		if !s.noOpenCV {
 			tImg := time.Now()
@@ -202,6 +204,8 @@ func (s *Server) Run(ctx context.Context) {
 			s.diagImageToMat.Observe(time.Since(tImg), log)
 		}
 
+		s.screenRGBA, rawRGBA = rawRGBA, s.screenRGBA
+
 		s.stats.Cost = time.Since(tStart)
 		s.stats.FPS, s.stats.FrameTime = s.fp.Count()
 		s.stats.FrameCount = s.source.FramesElapsed()
@@ -220,6 +224,7 @@ func (s *Server) Run(ctx context.Context) {
 func (s *Server) Close() error {
 	if !s.noOpenCV {
 		s.frame.mat.Close()
+		s.frameMatRGBAInter.Close()
 	}
 	return s.source.Close()
 }
@@ -237,14 +242,12 @@ func (s *Server) imageToMat(img image.Image, dst *gocv.Mat) (err error) {
 		if true != res {
 			return fmt.Errorf("image color format error")
 		}
-		// speed up the conversion process of RGBA format
-		src, err = gocv.NewMatFromBytes(y, x, gocv.MatTypeCV8UC4, m.Pix)
+		data, err := s.frameMatRGBAInter.DataPtrUint8()
 		if err != nil {
 			return err
 		}
-		defer src.Close()
-
-		return gocv.CvtColor(src, dst, s.cvtCode)
+		copy(data, m.Pix)
+		return gocv.CvtColor(s.frameMatRGBAInter, dst, s.cvtCode)
 
 	default:
 		imageToMatWarnOnce.Do(func() {
