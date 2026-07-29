@@ -401,10 +401,10 @@ func r6sLoop(ctx context.Context) {
 		defer weaponsMu.RUnlock()
 
 		var to *w.Weapon
-		// toName := "N/A"
+		toName := "N/A"
 		if newIndex >= 0 {
 			to = weapons[newIndex]
-			// toName = to.String()
+			toName = to.String()
 		}
 
 		if newIndex >= 0 {
@@ -416,11 +416,11 @@ func r6sLoop(ctx context.Context) {
 		} else if newIndex == lastIndex {
 			return
 		} else {
-			// log.Debug().
-			// 	Int("fromIndex", lastIndex).
-			// 	Int("toIndex", newIndex).
-			// 	Str("toName", toName).
-			// 	Msg("switching weapon")
+			log.Trace().
+				Int("fromIndex", lastIndex).
+				Int("toIndex", newIndex).
+				Str("toName", toName).
+				Msg("switching weapon")
 		}
 
 		// no debounce when debugging
@@ -435,7 +435,8 @@ func r6sLoop(ctx context.Context) {
 				// debounce skipping
 				timeToNone := lastSwitchToNone.Add(debounceInterval)
 				if time.Now().Before(timeToNone) {
-					log.Debug().Msg("switching skipped due to debounce")
+					log.Trace().
+						Msg("switching skipped due to debounce")
 					return
 				}
 				// exit debounce

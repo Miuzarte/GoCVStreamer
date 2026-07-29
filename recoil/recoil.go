@@ -5,22 +5,23 @@ import (
 	"io"
 	"math/rand/v2"
 	"sync"
+	"time"
 
 	"github.com/Miuzarte/GoCVStreamer/keystate"
 	"github.com/Miuzarte/GoCVStreamer/logger"
 	"github.com/Miuzarte/GoCVStreamer/mouse"
 	w "github.com/Miuzarte/GoCVStreamer/weapon"
-	"github.com/rs/zerolog"
 )
+
+var log = logger.New("Recoil")
 
 type Config struct {
 	Debugging bool
 }
 
 type Engine struct {
-	log zerolog.Logger
-	mu  sync.RWMutex
-	wp  *w.Weapon
+	mu sync.RWMutex
+	wp *w.Weapon
 
 	keys    *keystate.Tracker
 	clicker *mouse.Clicker
@@ -36,7 +37,6 @@ type Engine struct {
 
 func New(clicker *mouse.Clicker, cfg Config) *Engine {
 	return &Engine{
-		log:            logger.New("Engine"),
 		keys:           keystate.NewTracker(),
 		clicker:        clicker,
 		SpeedOffset:    -4,
@@ -62,41 +62,55 @@ func (e *Engine) Weapon() *w.Weapon {
 	return e.wp
 }
 
+var lastDoubleAlt = time.Now()
+
 func (e *Engine) Tick() {
-	shift := keystate.IsDown(keystate.VK_SHIFT)
+	alt := keystate.IsDown(keystate.VK_MENU)
+	lAlt := keystate.IsDown(keystate.VK_LMENU)
+	rAlt := keystate.IsDown(keystate.VK_RMENU)
 
-	if e.keys.Pressed(keystate.VK_OEM_PLUS) {
-		if !shift {
-			e.SpeedOffset++
-			e.log.Info().
-				Int("Offset", e.SpeedOffset).
-				Send()
-		} else {
-			e.HoriJitterBase++
-			e.log.Info().
-				Int("Jitter", e.HoriJitterBase).
-				Send()
-		}
-	}
-	if e.keys.Pressed(keystate.VK_OEM_MINUS) {
-		if !shift {
-			e.SpeedOffset--
-			e.log.Info().
-				Int("Offset", e.SpeedOffset).
-				Send()
-		} else {
-			e.HoriJitterBase--
-			e.log.Info().
-				Int("Jitter", e.HoriJitterBase).
-				Send()
-		}
-	}
-
-	if e.keys.Pressed(keystate.VK_INSERT) {
-		e.Alt = !e.Alt
-		e.log.Info().
-			Bool("Alt", e.Alt).
+	if lAlt && rAlt && time.Since(lastDoubleAlt) > time.Second {
+		lastDoubleAlt = time.Now()
+		log.Info().
+			Int("RecoilOffset", e.SpeedOffset).
+			Int("RecoilJitter", e.HoriJitterBase).
+			Bool("RecoilAlt", e.Alt).
 			Send()
+	}
+
+	if alt {
+		if e.keys.Pressed(keystate.VK_UP) {
+			e.SpeedOffset++
+			log.Info().
+				Int("RecoilOffset", e.SpeedOffset).
+				Send()
+		}
+		if e.keys.Pressed(keystate.VK_DOWN) {
+			e.SpeedOffset--
+			log.Info().
+				Int("RecoilOffset", e.SpeedOffset).
+				Send()
+		}
+
+		if e.keys.Pressed(keystate.VK_RIGHT) {
+			e.HoriJitterBase++
+			log.Info().
+				Int("RecoilJitter", e.HoriJitterBase).
+				Send()
+		}
+		if e.keys.Pressed(keystate.VK_LEFT) {
+			e.HoriJitterBase--
+			log.Info().
+				Int("RecoilJitter", e.HoriJitterBase).
+				Send()
+		}
+
+		if e.keys.Pressed(keystate.VK_INSERT) {
+			e.Alt = !e.Alt
+			log.Info().
+				Bool("RecoilAlt", e.Alt).
+				Send()
+		}
 	}
 
 	e.fullAutoTick()

@@ -35,7 +35,7 @@ func DefaultConfig() Config {
 		Enabled:          true,
 		Horizontal:       true,
 		Vertical:         false,
-		Speed:            4.0,
+		Speed:            8.0,
 		InnerRatio:       0.5,
 		RequireRButton:   true,
 		RequireMouseMove: true,
@@ -131,45 +131,60 @@ func (e *Engine) DisplayState(sb *strings.Builder) {
 	fmt.Fprintf(sb, "| Aim:%s V:%.1f |", mode, e.cfg.Speed)
 }
 
+var lastDoubleAlt = time.Now()
+
 func (e *Engine) ProcessKeys() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	shift := keystate.IsDown(keystate.VK_SHIFT)
+	alt := keystate.IsDown(keystate.VK_MENU)
+	lAlt := keystate.IsDown(keystate.VK_LMENU)
+	rAlt := keystate.IsDown(keystate.VK_RMENU)
 
-	if e.keys.Pressed(keystate.VK_DELETE) {
-		e.cfg.Enabled = !e.cfg.Enabled
+	if lAlt && rAlt && time.Since(lastDoubleAlt) > time.Second {
+		lastDoubleAlt = time.Now()
 		log.Info().
-			Bool("enabled", e.cfg.Enabled).
-			Msg("aim assist toggled")
+			Float64("AimAssistSpeed", e.cfg.Speed).
+			Bool("AimAssistHorizontal", e.cfg.Horizontal).
+			Bool("AimAssistVertical", e.cfg.Vertical).
+			Send()
 	}
 
-	if e.cfg.Enabled && shift && e.keys.Pressed(keystate.VK_DELETE) {
-		if e.cfg.Horizontal && !e.cfg.Vertical {
-			e.cfg.Vertical = true
-		} else if e.cfg.Vertical {
-			e.cfg.Vertical = false
-			e.cfg.Horizontal = false
-		} else {
-			e.cfg.Horizontal = true
+	if alt {
+		if e.keys.Pressed(keystate.VK_DELETE) {
+			e.cfg.Enabled = !e.cfg.Enabled
+			log.Info().
+				Bool("AimAssist", e.cfg.Enabled).
+				Send()
 		}
-		log.Info().
-			Bool("horizontal", e.cfg.Horizontal).
-			Bool("vertical", e.cfg.Vertical).
-			Msg("aim assist mode changed")
-	}
 
-	if e.keys.Pressed(keystate.VK_OEM_4) && shift {
-		e.cfg.Speed = math.Max(1, e.cfg.Speed-1)
-		log.Info().
-			Float64("speed", e.cfg.Speed).
-			Msg("aim assist speed decreased")
-	}
-	if e.keys.Pressed(keystate.VK_OEM_6) && shift {
-		e.cfg.Speed = math.Min(20.0, e.cfg.Speed+1)
-		log.Info().
-			Float64("speed", e.cfg.Speed).
-			Msg("aim assist speed increased")
+		if e.cfg.Enabled && e.keys.Pressed(keystate.VK_PAUSE) {
+			if e.cfg.Horizontal && !e.cfg.Vertical {
+				e.cfg.Vertical = true
+			} else if e.cfg.Vertical {
+				e.cfg.Vertical = false
+				e.cfg.Horizontal = false
+			} else {
+				e.cfg.Horizontal = true
+			}
+			log.Info().
+				Bool("AimAssistHorizontal", e.cfg.Horizontal).
+				Bool("AimAssistVertical", e.cfg.Vertical).
+				Send()
+		}
+
+		if e.keys.Pressed(keystate.VK_PRIOR) {
+			e.cfg.Speed = math.Min(20.0, e.cfg.Speed+1)
+			log.Info().
+				Float64("AimAssistSpeed", e.cfg.Speed).
+				Send()
+		}
+		if e.keys.Pressed(keystate.VK_NEXT) {
+			e.cfg.Speed = math.Max(1, e.cfg.Speed-1)
+			log.Info().
+				Float64("AimAssistSpeed", e.cfg.Speed).
+				Send()
+		}
 	}
 }
 

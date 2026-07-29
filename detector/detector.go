@@ -242,6 +242,7 @@ func (e *Engine) Run(ctx context.Context) {
 			log.Warn().
 				Err(err).
 				Msg("yolo detection failed")
+			time.Sleep(time.Millisecond * 100)
 			continue
 		}
 		if origW != e.cfg.InputSize || origH != e.cfg.InputSize {
