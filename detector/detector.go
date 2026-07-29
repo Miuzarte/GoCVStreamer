@@ -4,6 +4,7 @@ import (
 	"context"
 	"image"
 	"image/draw"
+	"math"
 	"runtime"
 	"sync"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"gioui.org/layout"
 
 	"github.com/Miuzarte/GoCVStreamer/capturer"
+	"github.com/Miuzarte/GoCVStreamer/cuda"
 	"github.com/Miuzarte/GoCVStreamer/fps"
 	"github.com/Miuzarte/GoCVStreamer/libyuv"
 	"github.com/Miuzarte/GoCVStreamer/logger"
@@ -23,7 +25,8 @@ import (
 var log = logger.New("Detector")
 
 type Config struct {
-	Fps int
+	Fps     int
+	FpsIdle int
 
 	ModelPath          string
 	OnnxLibPath        string
@@ -41,7 +44,8 @@ type Config struct {
 
 func DefaultConfig() Config {
 	return Config{
-		Fps: 30,
+		Fps:     30,
+		FpsIdle: 0,
 
 		ModelPath:          `B:\Git\go-vision\_weights\yolo26_weights\yolo26n.onnx`,
 		OnnxLibPath:        `B:\Git\GoCVStreamer\libs\onnxruntime-win-x64-gpu_cuda13-1.28.0\lib\onnxruntime.dll`,
@@ -108,6 +112,7 @@ func (e *Engine) Close() {
 	if e.detEngine != nil {
 		e.detEngine.Destroy()
 	}
+	cuda.DestroyCurrentContext()
 }
 
 func (e *Engine) Detect(img image.Image) error {
@@ -197,27 +202,64 @@ func (e *Engine) Run(ctx context.Context) {
 	}
 
 	interval := time.Second / time.Duration(e.cfg.Fps)
+	intervalIdle := time.Duration(math.MaxInt64)
+	if e.cfg.FpsIdle != 0 {
+		intervalIdle = time.Second / time.Duration(e.cfg.FpsIdle)
+	}
 
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	tickerNormal := time.NewTicker(interval)
+	defer tickerNormal.Stop()
+	tickerIdle := time.NewTicker(intervalIdle)
+	defer tickerIdle.Stop()
+	mixinTicker := make(chan time.Time, 2)
+	defer close(mixinTicker)
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-		}
 
-		if e.idleCheck != nil && e.idleCheck() {
-			e.mu.Lock()
-			e.stats = Stats{}
-			e.personResults = nil
-			e.mu.Unlock()
+		case t, ok := <-tickerNormal.C:
+			if !ok {
+				return
+			}
+			if e.idleCheck != nil && e.idleCheck() {
+				e.mu.Lock()
+				e.stats = Stats{}
+				e.personResults = nil
+				e.mu.Unlock()
+				continue
+			}
+			select {
+			case mixinTicker <- t:
+			default:
+			}
 			continue
+
+		case t, ok := <-tickerIdle.C:
+			if !ok {
+				return
+			}
+			if e.idleCheck == nil || !e.idleCheck() {
+				continue
+			}
+			select {
+			case mixinTicker <- t:
+			default:
+			}
+			continue
+
+		case _, ok := <-mixinTicker:
+			if !ok {
+				return
+			}
 		}
 
-		// e.capturerServer.Request(capturer.TagYOLO, interval)
-		e.capturerServer.RaiseCeiling(e.cfg.Fps)
+		fps := e.cfg.Fps
+		if e.idleCheck != nil && e.idleCheck() {
+			fps = e.cfg.FpsIdle
+		}
+		e.capturerServer.RaiseCeiling(fps)
 
 		id := e.capturerServer.ReadFrameId()
 		if id == lastFrameId {

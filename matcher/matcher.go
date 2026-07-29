@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"math"
 	"runtime"
 	"sync"
 	"time"
@@ -162,7 +163,10 @@ func (e *Engine) Run(ctx context.Context) {
 	defer capture.Close()
 
 	interval := time.Second / time.Duration(e.cfg.Fps)
-	intervalIdle := time.Second / time.Duration(e.cfg.FpsIdle)
+	intervalIdle := time.Duration(math.MaxInt64)
+	if e.cfg.FpsIdle != 0 {
+		intervalIdle = time.Second / time.Duration(e.cfg.FpsIdle)
+	}
 
 	tickerNormal := time.NewTicker(interval)
 	defer tickerNormal.Stop()

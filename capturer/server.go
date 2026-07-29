@@ -91,6 +91,9 @@ func (s *Server) Bounds() image.Rectangle {
 }
 
 func (s *Server) RaiseCeiling(fps int) {
+	if fps <= 0 {
+		return
+	}
 	s.targetMu.Lock()
 	defer s.targetMu.Unlock()
 	if fps >= s.targetFps {

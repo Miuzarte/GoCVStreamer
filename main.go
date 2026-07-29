@@ -26,6 +26,7 @@ import (
 	"github.com/Miuzarte/GoCVStreamer/assist"
 	"github.com/Miuzarte/GoCVStreamer/capturer"
 	cwg "github.com/Miuzarte/GoCVStreamer/contextWaitGroup"
+	"github.com/Miuzarte/GoCVStreamer/cuda"
 	"github.com/Miuzarte/GoCVStreamer/detector"
 	"github.com/Miuzarte/GoCVStreamer/keystate"
 	"github.com/Miuzarte/GoCVStreamer/logger"
@@ -654,6 +655,12 @@ func initDetector() *detector.Engine {
 	cfg := detector.DefaultConfig()
 	cfg.Fps = 30
 	cfg.CropSize = cfg.InputSize * 2
+
+	if _, err := cuda.InitContextCiG(); err != nil {
+		log.Warn().
+			Err(err).
+			Msg("CUDA context init failed, ORT will use default context")
+	}
 
 	log.Debug().
 		Str("modelPath", cfg.ModelPath).
