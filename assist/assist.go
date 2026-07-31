@@ -46,21 +46,30 @@ type Engine struct {
 	cfg Config
 	mu  sync.RWMutex
 
-	bounds   image.Rectangle
-	detector *detector.Engine
-	keys     *keystate.Tracker
+	bounds  image.Rectangle
+	sources []detector.Source
+	keys    *keystate.Tracker
+
+	foregroundAllowed func() bool
 
 	targetBox image.Rectangle
 	isActive  bool
 }
 
-func New(cfg Config, det *detector.Engine, bounds image.Rectangle) *Engine {
+func New(cfg Config, sources []detector.Source, bounds image.Rectangle) *Engine {
 	return &Engine{
-		cfg:      cfg,
-		bounds:   bounds,
-		detector: det,
-		keys:     keystate.NewTracker(),
+		cfg:     cfg,
+		bounds:  bounds,
+		sources: sources,
+		keys:    keystate.NewTracker(),
 	}
+}
+
+// SetForegroundAllowed 设置前台门控：返回 false 时 assist 完全停用（如非目标游戏前台）。
+func (e *Engine) SetForegroundAllowed(fn func() bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.foregroundAllowed = fn
 }
 
 func (e *Engine) DisplayState(sb *strings.Builder) {
@@ -69,6 +78,10 @@ func (e *Engine) DisplayState(sb *strings.Builder) {
 
 	if !e.cfg.Enabled {
 		sb.WriteString("| Aim:OFF |")
+		return
+	}
+	if e.foregroundAllowed != nil && !e.foregroundAllowed() {
+		sb.WriteString("| Aim:OFF(FG) |")
 		return
 	}
 
@@ -139,7 +152,17 @@ func (e *Engine) ProcessKeys() {
 func (e *Engine) Tick() {
 	e.mu.RLock()
 	cfg := e.cfg
+	foregroundAllowed := e.foregroundAllowed
 	e.mu.RUnlock()
+
+	// 前台门控：非目标游戏在前台时完全停用。
+	if foregroundAllowed != nil && !foregroundAllowed() {
+		e.mu.Lock()
+		e.isActive = false
+		e.targetBox = image.Rectangle{}
+		e.mu.Unlock()
+		return
+	}
 
 	if !cfg.Enabled {
 		e.mu.Lock()
@@ -174,8 +197,23 @@ func (e *Engine) Tick() {
 		return
 	}
 
-	results, _ := e.detector.Snapshot()
-	if len(results) == 0 {
+	// 多来源策略：取全链路延迟最低且新鲜的来源。
+	// 本地延迟=推理耗时；远程延迟=帧发出到收到结果（网络+手机推理）。
+	var results []detector.Result
+	var bestLatency time.Duration
+	bestSet := false
+	for _, src := range e.sources {
+		srcResults, latency, fresh := src.Snapshot()
+		if !fresh || len(srcResults) == 0 {
+			continue
+		}
+		if !bestSet || latency < bestLatency {
+			results = srcResults
+			bestLatency = latency
+			bestSet = true
+		}
+	}
+	if !bestSet {
 		e.mu.Lock()
 		e.isActive = false
 		e.targetBox = image.Rectangle{}

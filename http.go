@@ -28,6 +28,16 @@ type MetricsSnapshot struct {
 	DetectionCostMs float64 `json:"detection_cost_ms"`
 	DetectionCount  int     `json:"detection_count"`
 
+	StreamClients     int     `json:"stream_clients"`
+	StreamFps         float64 `json:"stream_fps"`
+	StreamFramesSent  uint64  `json:"stream_frames_sent"`
+	StreamDetections  uint64  `json:"stream_detections"`
+	StreamLastCount   int     `json:"stream_last_count"`
+	StreamLatencyMs   float64 `json:"stream_latency_ms"`
+	StreamInferenceMs float64 `json:"stream_inference_ms"`
+	StreamNetworkMs   float64 `json:"stream_network_ms"`
+	StreamFresh       bool    `json:"stream_fresh"`
+
 	Cpu       float64 `json:"cpu"`
 	Debugging bool    `json:"debugging"`
 
@@ -71,10 +81,35 @@ func snapshotMetrics() (m MetricsSnapshot) {
 	}
 
 	if detectorEngine != nil {
-		results, s := detectorEngine.Snapshot()
+		s := detectorEngine.Stats()
 		m.DetectionFps = s.Fps
 		m.DetectionCostMs = float64(s.Cost) / ms
-		m.DetectionCount = len(results)
+	}
+	for _, src := range inferenceSources {
+		results, _, fresh := src.Snapshot()
+		if fresh {
+			m.DetectionCount += len(results)
+		}
+	}
+
+	if streamServer != nil {
+		s := streamServer.Stats()
+		m.StreamClients = s.Clients
+		m.StreamFps = s.Fps
+		m.StreamFramesSent = s.FramesSent
+		m.StreamDetections = s.Detections
+		if remoteSource != nil {
+			if _, _, fresh := remoteSource.Snapshot(); fresh {
+				m.StreamFresh = true
+				m.StreamLastCount = s.LastCount
+				m.StreamLatencyMs = float64(s.LastLatency) / ms
+				m.StreamInferenceMs = float64(s.LastInference) / ms
+				m.StreamNetworkMs = m.StreamLatencyMs - m.StreamInferenceMs
+				if m.StreamNetworkMs < 0 {
+					m.StreamNetworkMs = 0
+				}
+			}
+		}
 	}
 
 	m.Cpu = cpu

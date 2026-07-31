@@ -111,10 +111,33 @@ func (s *Server) ReadRgba() *image.RGBA {
 	return s.frame.rgba
 }
 
+// CloneRgba 返回最新 RGBA 帧的深拷贝（供其他 goroutine 编码/发送用）。
+func (s *Server) CloneRgba() *image.RGBA {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.frame.rgba == nil {
+		return nil
+	}
+	cp := image.NewRGBA(s.frame.rgba.Bounds())
+	copy(cp.Pix, s.frame.rgba.Pix)
+	return cp
+}
+
 func (s *Server) ReadMat() gocv.Mat {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.frame.mat
+}
+
+// CloneMat 返回最新 OpenCV Mat 的深拷贝（供其他 goroutine 编码/发送用）。
+// 第二个返回值表示是否可用（noopencv 模式下为空）。
+func (s *Server) CloneMat() (gocv.Mat, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.frame.mat.Empty() {
+		return gocv.Mat{}, false
+	}
+	return s.frame.mat.Clone(), true
 }
 
 func (s *Server) ReadFrameId() uint64 {

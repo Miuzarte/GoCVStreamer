@@ -109,11 +109,12 @@ func New(capturerServer *capturer.Server, cfg Config) (*Engine, error) {
 	}, nil
 }
 
-func (e *Engine) Close() {
+func (e *Engine) Close() error {
 	if e.detEngine != nil {
 		e.detEngine.Destroy()
 	}
 	cuda.DestroyCurrentContext()
+	return nil
 }
 
 func (e *Engine) Detect(img image.Image) error {
@@ -138,10 +139,18 @@ func (e *Engine) Detect(img image.Image) error {
 	return nil
 }
 
-func (e *Engine) Snapshot() (results []yolo26.DetResult, stats Stats) {
+// Snapshot 实现 Source 接口：返回本地结果（屏幕坐标系）与最近一次推理延迟。
+func (e *Engine) Snapshot() (results []Result, latency time.Duration, fresh bool) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	return e.personResults, e.stats
+	if len(e.personResults) == 0 {
+		return nil, e.stats.Cost, false
+	}
+	results = make([]Result, len(e.personResults))
+	for i, d := range e.personResults {
+		results[i] = Result{DetResult: d, Kind: KindLocal, Latency: e.stats.Cost}
+	}
+	return results, e.stats.Cost, true
 }
 
 func (e *Engine) Stats() Stats {
@@ -271,18 +280,18 @@ func (e *Engine) Run(ctx context.Context) {
 			continue
 		}
 
-	var detectImg image.Image
-	if cropNeeded {
-		draw.Draw(cropImg, cropImg.Bounds(), captureRgba, cropOffset, draw.Src)
-		detectImg = cropImg
-	} else {
-		copy(localImg.Pix, captureRgba.Pix)
-		detectImg = localImg
-	}
-	origW := detectImg.Bounds().Dx()
-	origH := detectImg.Bounds().Dy()
-	libyuv.ResizeRGBAInto(resizeDst, detectImg.(*image.RGBA), e.cfg.InputSize, e.cfg.InputSize)
-	detectImg = resizeDst
+		var detectImg image.Image
+		if cropNeeded {
+			draw.Draw(cropImg, cropImg.Bounds(), captureRgba, cropOffset, draw.Src)
+			detectImg = cropImg
+		} else {
+			copy(localImg.Pix, captureRgba.Pix)
+			detectImg = localImg
+		}
+		origW := detectImg.Bounds().Dx()
+		origH := detectImg.Bounds().Dy()
+		libyuv.ResizeRGBAInto(resizeDst, detectImg.(*image.RGBA), e.cfg.InputSize, e.cfg.InputSize)
+		detectImg = resizeDst
 
 		err := e.Detect(detectImg)
 		if err != nil {
@@ -305,11 +314,18 @@ func (e *Engine) Run(ctx context.Context) {
 }
 
 func (e *Engine) Draw(gtx layout.Context, s ui.DScale) {
-	results, _ := e.Snapshot()
-	for _, det := range results {
-		rect := s.Rect(det.Box)
-		ui.DrawBorder(gtx, ui.ColorGreen.NRGBA(), rect)
-		labelPos := image.Pt(rect.Min.X, rect.Min.Y-ui.FontSize)
-		ui.DrawLabel(gtx, ui.ColorGreen.NRGBA(), labelPos, ui.FontSize, ui.FormatPct(det.Score))
+	results, _, fresh := e.Snapshot()
+	if !fresh {
+		return
 	}
+	for _, r := range results {
+		e.drawDet(gtx, s, r.DetResult, ui.ColorGreen)
+	}
+}
+
+func (e *Engine) drawDet(gtx layout.Context, s ui.DScale, det yolo26.DetResult, color ui.RGBA) {
+	rect := s.Rect(det.Box)
+	ui.DrawBorder(gtx, color.NRGBA(), rect)
+	labelPos := image.Pt(rect.Min.X, rect.Min.Y-ui.FontSize)
+	ui.DrawLabel(gtx, color.NRGBA(), labelPos, ui.FontSize, ui.FormatPct(det.Score))
 }

@@ -33,11 +33,13 @@ import (
 	"github.com/Miuzarte/GoCVStreamer/matcher"
 	"github.com/Miuzarte/GoCVStreamer/mouse"
 	"github.com/Miuzarte/GoCVStreamer/recoil"
+	"github.com/Miuzarte/GoCVStreamer/sender"
 	"github.com/Miuzarte/GoCVStreamer/ui"
 	w "github.com/Miuzarte/GoCVStreamer/weapon"
 	ws "github.com/Miuzarte/GoCVStreamer/weapons"
 	"github.com/Miuzarte/GoCVStreamer/widgets"
 	"github.com/fsnotify/fsnotify"
+	"github.com/getcharzp/go-vision/yolo26"
 	"github.com/kbinani/screenshot"
 	"github.com/shirou/gopsutil/v4/process"
 	"gocv.io/x/gocv"
@@ -58,6 +60,13 @@ var (
 	obsIndex    = flag.Int("obsindex", 0, "OBS Virtual Camera device index")
 	obsWidth    = flag.Int("obswidth", 0, "OBS Virtual Camera width (0=default)")
 	obsHeight   = flag.Int("obsheight", 0, "OBS Virtual Camera height (0=default)")
+
+	streamAddr    = flag.String("stream", ":9090", "WebSocket stream server address (empty to disable)")
+	streamFps     = flag.Int("streamfps", 30, "WebSocket stream target FPS")
+	streamQuality = flag.Int("streamquality", 80, "WebSocket stream JPEG quality (1-100)")
+	streamCrop    = flag.Int("streamcrop", 1280, "WebSocket stream center crop size (0=no crop)")
+	nosender      = flag.Bool("nosender", false, "disable WebSocket stream server")
+	streamTtl     = flag.Int("streamttl", 500, "remote results TTL in ms (0 disables remote results)")
 )
 
 var log = logger.New("Streamer")
@@ -92,12 +101,15 @@ var (
 )
 
 var (
-	capturerServer *capturer.Server
-	matcherEngine  *matcher.Engine
-	detectorEngine *detector.Engine
-	recoilEngine   *recoil.Engine
-	assistEngine   *assist.Engine
-	window         *ui.Window
+	capturerServer   *capturer.Server
+	streamServer     *sender.Server
+	matcherEngine    *matcher.Engine
+	detectorEngine   *detector.Engine
+	remoteSource     *detector.RemoteSource
+	recoilEngine     *recoil.Engine
+	assistEngine     *assist.Engine
+	window           *ui.Window
+	inferenceSources []detector.Source
 
 	cpu         float64
 	forceUpdate bool
@@ -300,6 +312,36 @@ func main() {
 		})
 	}
 
+	if *streamAddr != "" && !*nosender {
+		streamServer = sender.NewServer(sender.Config{
+			Addr:        *streamAddr,
+			Fps:         *streamFps,
+			JpegQuality: *streamQuality,
+			CropSize:    *streamCrop,
+		}, capturerServer)
+		remoteSource = detector.NewRemoteSource(time.Duration(*streamTtl) * time.Millisecond)
+		streamServer.OnResult = func(res sender.RemoteResult, latency time.Duration) {
+			dets := make([]yolo26.DetResult, 0, len(res.Detections))
+			for _, d := range res.Detections {
+				if d.Class != 0 {
+					continue // 只接收 person（COCO class 0）
+				}
+				dets = append(dets, yolo26.DetResult{
+					ClassID: d.Class,
+					Score:   float32(d.Score),
+					Box:     streamServer.Transform(d),
+				})
+			}
+			remoteSource.SetResults(dets, latency)
+			log.Trace().
+				Uint64("frame_id", res.FrameID).
+				Int("detections", len(res.Detections)).
+				Dur("latency", latency).
+				Msg("remote detection result")
+		}
+		cwg.Go(streamServer.Run)
+	}
+
 	if !*noopencv {
 		matcherCfg := matcher.Config{
 			Fps:              5,
@@ -322,6 +364,12 @@ func main() {
 
 	if !*noyolo {
 		detectorEngine = initDetector()
+	}
+	if detectorEngine != nil {
+		inferenceSources = append(inferenceSources, detectorEngine)
+	}
+	if remoteSource != nil {
+		inferenceSources = append(inferenceSources, remoteSource)
 	}
 	if detectorEngine == nil {
 		log.Warn().
@@ -359,7 +407,10 @@ func main() {
 				}
 				assistCfg.RequireMouseMove = false
 			}
-			assistEngine = assist.New(assistCfg, detectorEngine, capturerServer.Bounds())
+			assistEngine = assist.New(assistCfg, inferenceSources, capturerServer.Bounds())
+			assistEngine.SetForegroundAllowed(func() bool {
+				return assistForegroundAllowed.Load()
+			})
 		}
 	}
 
@@ -378,8 +429,8 @@ func main() {
 		if matcherEngine != nil {
 			window.Register(matcherEngine)
 		}
-		if detectorEngine != nil {
-			window.Register(detectorEngine)
+		if len(inferenceSources) != 0 {
+			window.Register(&detector.Drawer{Sources: inferenceSources})
 		}
 		if assistEngine != nil {
 			window.Register(assistEngine)
@@ -406,6 +457,11 @@ func main() {
 
 	if assistEngine != nil {
 		cwg.Go(assistEngine.Run)
+		if names := gameProcessNames(*game); len(names) != 0 {
+			cwg.Go(func(ctx context.Context) {
+				foregroundGameLoop(ctx, names)
+			})
+		}
 	}
 
 	if !*nogui {
@@ -705,12 +761,21 @@ func (d *metricsDrawer) Draw(gtx layout.Context, s ui.DScale) {
 
 	fmt.Fprintf(&sb, "| Capture: %.0ffps(%.1fms)", m.CaptureFps, m.CaptureCostMs)
 
-	fmt.Fprintf(&sb, " | Match: %.0ffps(%.1fms/%d=%.2fms)", m.MatchFps, m.MatchCostMs, m.MatchCount, safeDiv(m.MatchCostMs, float64(m.MatchCount)))
-
-	if detectorEngine != nil {
-		fmt.Fprintf(&sb, " | Detection: %.0ffps/%d(%.1fms) |", m.DetectionFps, m.DetectionCount, m.DetectionCostMs)
-	}
+	fmt.Fprintf(&sb, " | Match: %.0ffps(%.1fms/%d=%.2fms) |", m.MatchFps, m.MatchCostMs, m.MatchCount, safeDiv(m.MatchCostMs, float64(m.MatchCount)))
 	sb.WriteByte('\n')
+
+	if len(inferenceSources) != 0 {
+		sb.WriteString("| Detection: ")
+		fmt.Fprintf(&sb, "%.0ffps/%d", m.DetectionFps, m.DetectionCount)
+		if detectorEngine != nil {
+			fmt.Fprintf(&sb, " | Local: %.1fms", m.DetectionCostMs)
+		}
+		if m.StreamFresh {
+			fmt.Fprintf(&sb, " | Remote: net %.1fms + inf %.1fms", m.StreamNetworkMs, m.StreamInferenceMs)
+		}
+		sb.WriteString(" |")
+		sb.WriteByte('\n')
+	}
 
 	fmt.Fprintf(&sb, "| 0x%04X | CPU: %04.1f%% | GC: %d(avg: %.2fus, last: %.2fs) |", m.FramesElapsed, cpu, m.GcCount, m.GcPauseAvgUs, m.GcSinceLastS)
 	if debugging {
