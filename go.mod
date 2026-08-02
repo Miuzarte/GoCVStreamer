@@ -4,6 +4,7 @@ go 1.26
 
 require (
 	gioui.org v0.10.1
+	github.com/coder/websocket v1.8.15
 	github.com/ebitengine/purego v0.10.2
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/getcharzp/go-vision v0.0.0-20260213095537-94f2a346b769
@@ -22,7 +23,6 @@ require (
 	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/go-text/typesetting v0.3.4 // indirect
 	github.com/godbus/dbus/v5 v5.2.2 // indirect
-	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/jezek/xgb v1.3.1 // indirect
 	github.com/lufia/plan9stats v0.0.0-20260627054121-477a66015f15 // indirect
 	github.com/lxn/win v0.0.0-20210218163916-a377121e959e // indirect

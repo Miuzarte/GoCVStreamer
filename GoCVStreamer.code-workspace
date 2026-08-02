@@ -25,5 +25,6 @@
 			"B:/Lib/opencv_build/install/include"
 			// "B:/Lib/opencv_build_msvc_cuda/install/include"
 		],
+		"powershell.cwd": "GoCVStreamer",
 	}
 }

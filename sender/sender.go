@@ -17,7 +17,7 @@ import (
 	"github.com/Miuzarte/GoCVStreamer/fps"
 	"github.com/Miuzarte/GoCVStreamer/libyuv"
 	"github.com/Miuzarte/GoCVStreamer/logger"
-	"github.com/gorilla/websocket"
+	"github.com/coder/websocket"
 )
 
 var log = logger.New("Sender")
@@ -63,8 +63,6 @@ type Server struct {
 	cfg Config
 	src *capturer.Server
 
-	upgrader websocket.Upgrader
-
 	clientMu sync.Mutex
 	clients  map[*websocket.Conn]struct{}
 
@@ -97,14 +95,8 @@ func NewServer(cfg Config, src *capturer.Server) *Server {
 		cfg.InputSize = 640
 	}
 	s := &Server{
-		cfg: cfg,
-		src: src,
-		upgrader: websocket.Upgrader{
-			ReadBufferSize:  4096,
-			WriteBufferSize: 64 * 1024,
-			// 手机 App 无 Origin 限制，全部放行。
-			CheckOrigin: func(*http.Request) bool { return true },
-		},
+		cfg:     cfg,
+		src:     src,
 		clients: make(map[*websocket.Conn]struct{}),
 		sentAt:  make(map[uint32]time.Time),
 		fp:      fps.NewCounter(time.Second),
@@ -135,8 +127,12 @@ func (s *Server) Run(ctx context.Context) {
 
 	go func() {
 		<-ctx.Done()
-		s.closeAll()
-		srv.Shutdown(context.Background())
+		s.closeAll() // 先断开所有客户端，让活跃 handler 退出
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			srv.Close()
+		}
 	}()
 	go s.runLoop(ctx)
 
@@ -171,10 +167,16 @@ func (s *Server) Stats() Stats {
 }
 
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
-	c, err := s.upgrader.Upgrade(w, r, nil)
+	remote := r.RemoteAddr
+	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+		// 与 goApp/flutterApp 客户端协商压缩；手机 App 无 Origin 限制，全部放行。
+		CompressionMode: websocket.CompressionContextTakeover,
+		OriginPatterns:  []string{"*"},
+	})
 	if err != nil {
 		return
 	}
+	c.SetReadLimit(1 << 20) // 检测 JSON 足够小，1 MiB 上限
 
 	s.clientMu.Lock()
 	s.clients[c] = struct{}{}
@@ -182,22 +184,22 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	defer func() {
 		s.removeClient(c)
-		c.Close()
+		c.CloseNow()
 	}()
 
 	log.Info().
-		Str("remote", c.RemoteAddr().String()).
+		Str("remote", remote).
 		Msg("stream client connected")
 
-	c.SetReadLimit(1 << 20) // 检测 JSON 足够小，1 MiB 上限
-	c.SetReadDeadline(time.Now().Add(60 * time.Second))
+	// r.Context() 在客户端断开或服务端关闭时自动取消，读循环随之退出，
+	// 不需要再维护手动读超时。
+	ctx := r.Context()
 	for {
-		mt, data, err := c.ReadMessage()
+		mt, data, err := c.Read(ctx)
 		if err != nil {
 			return
 		}
-		c.SetReadDeadline(time.Now().Add(60 * time.Second))
-		if mt != websocket.TextMessage {
+		if mt != websocket.MessageText {
 			continue
 		}
 
@@ -241,7 +243,7 @@ func (s *Server) closeAll() {
 	s.clientMu.Lock()
 	defer s.clientMu.Unlock()
 	for c := range s.clients {
-		c.Close()
+		c.CloseNow()
 	}
 	s.clients = make(map[*websocket.Conn]struct{})
 }
@@ -319,10 +321,12 @@ func (s *Server) Broadcast(frameID uint32, jpegData []byte) {
 	copy(msg[4:], jpegData)
 
 	for c := range s.clients {
-		c.SetWriteDeadline(time.Now().Add(5 * time.Second))
-		if err := c.WriteMessage(websocket.BinaryMessage, msg); err != nil {
+		writeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := c.Write(writeCtx, websocket.MessageBinary, msg)
+		cancel()
+		if err != nil {
 			delete(s.clients, c)
-			c.Close()
+			c.CloseNow()
 		}
 	}
 	s.clientMu.Unlock()
