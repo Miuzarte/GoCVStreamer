@@ -45,7 +45,7 @@ type Config struct {
 	Fps         int    // 推流目标帧率
 	JpegQuality int    // JPEG 质量 1-100
 	InputSize   int    // 流帧边长（正方形），默认 640
-	CropSize    int    // 中心裁剪边长，0 表示不裁剪（默认 1280）
+	CropSize    int    // 中心裁剪边长：-1=屏幕短边（自动），0=不裁剪，>0=固定值（默认 1280）
 }
 
 type Stats struct {
@@ -105,12 +105,15 @@ func NewServer(cfg Config, src *capturer.Server) *Server {
 	// 裁剪几何信息在构造时确定（bounds 不变），供 Transform 无锁读取。
 	bounds := src.Bounds()
 	s.cropSize = cfg.CropSize
-	if s.cropSize > 0 {
+	if s.cropSize < 0 {
+		// -1：自动使用屏幕短边（横屏下即屏幕高度），视野最大且保持正方形。
+		s.cropSize = min(bounds.Dx(), bounds.Dy())
+	} else if s.cropSize > 0 {
 		s.cropSize = min(s.cropSize, bounds.Dx(), bounds.Dy())
-		if s.cropSize < bounds.Dx() || s.cropSize < bounds.Dy() {
-			s.cropNeeded = true
-			s.cropOffset = image.Pt((bounds.Dx()-s.cropSize)/2, (bounds.Dy()-s.cropSize)/2)
-		}
+	}
+	if s.cropSize > 0 && (s.cropSize < bounds.Dx() || s.cropSize < bounds.Dy()) {
+		s.cropNeeded = true
+		s.cropOffset = image.Pt((bounds.Dx()-s.cropSize)/2, (bounds.Dy()-s.cropSize)/2)
 	}
 	return s
 }

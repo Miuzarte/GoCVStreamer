@@ -39,7 +39,7 @@ type Config struct {
 	// https://github.com/ultralytics/ultralytics/blob/main/ultralytics/cfg/datasets/coco.yaml
 	ResultIds utils.Set[int]
 
-	CropSize int
+	CropSize int // 中心裁剪边长：-1=屏幕短边（自动），0=不裁剪，>0=固定值
 }
 
 func DefaultConfig() Config {
@@ -198,12 +198,15 @@ func (e *Engine) Run(ctx context.Context) {
 	cropSize := e.cfg.CropSize
 	cropOffset := image.Pt(0, 0)
 	cropNeeded := false
-	if cropSize > 0 {
+	if cropSize < 0 {
+		// -1：自动使用屏幕短边（横屏下即屏幕高度），视野最大且保持正方形。
+		cropSize = min(bounds.Dx(), bounds.Dy())
+	} else if cropSize > 0 {
 		cropSize = min(cropSize, bounds.Dx(), bounds.Dy())
-		if cropSize < bounds.Dx() || cropSize < bounds.Dy() {
-			cropNeeded = true
-			cropOffset = image.Pt((bounds.Dx()-cropSize)/2, (bounds.Dy()-cropSize)/2)
-		}
+	}
+	if cropSize > 0 && (cropSize < bounds.Dx() || cropSize < bounds.Dy()) {
+		cropNeeded = true
+		cropOffset = image.Pt((bounds.Dx()-cropSize)/2, (bounds.Dy()-cropSize)/2)
 	}
 
 	cropImg := image.NewRGBA(image.Rect(0, 0, cropSize, cropSize))

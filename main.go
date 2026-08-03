@@ -66,7 +66,7 @@ var (
 	streamAddr    = flag.String("stream", ":9090", "WebSocket stream server address (empty to disable)")
 	streamFps     = flag.Int("streamfps", 30, "WebSocket stream target FPS")
 	streamQuality = flag.Int("streamquality", 80, "WebSocket stream JPEG quality (1-100)")
-	streamCrop    = flag.Int("streamcrop", 1280, "WebSocket stream center crop size (0=no crop)")
+	streamCrop    = flag.Int("streamcrop", 1280, "WebSocket stream center crop size (-1=screen short edge, 0=no crop)")
 	nosender      = flag.Bool("nosender", false, "disable WebSocket stream server")
 	streamTtl     = flag.Int("streamttl", 500, "remote results TTL in ms (0 disables remote results)")
 )
