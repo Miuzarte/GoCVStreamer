@@ -116,6 +116,49 @@ Write-Host "  CGO_LDFLAGS: $env:CGO_LDFLAGS"
 $output = "streamer.exe"
 # $output = "streamer_cuda.exe"
 
+$wgcDll = Join-Path $PSScriptRoot "wgc_helper.dll"
+if ($Command.ToLower() -ne "wgcdll" -and -not (Test-Path $wgcDll)) {
+    Write-Host "wgc_helper.dll 不存在，WGC 采集将回退到 DXGI。需要时先执行: .\build.ps1 wgcdll" -ForegroundColor Yellow
+}
+
+# 用本机 MSVC + Windows SDK 编译 wgc_helper.dll（C++/WinRT）。
+# 仅在显式执行 "wgcdll" 时构建，release/debug/run 不会自动重建。
+function Build-WgcDll {
+    $vcvars = "B:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat"
+    if (-not (Test-Path $vcvars)) {
+        Write-Host "vcvars64.bat not found: $vcvars" -ForegroundColor Red
+        exit 1
+    }
+
+    $wgcDir = Join-Path $PSScriptRoot "wgc\helper"
+    $objDir = Join-Path $env:TEMP "wgc_helper_obj"
+    New-Item -ItemType Directory -Force -Path $objDir | Out-Null
+
+    $outDll = Join-Path $PSScriptRoot "wgc_helper.dll"
+
+    Write-Host "Building wgc_helper.dll ..." -ForegroundColor Green
+
+    # 导入 vcvars64.bat 设置的环境变量（INCLUDE/LIB/PATH 等）
+    cmd /c "`"$vcvars`" >nul && set" | ForEach-Object {
+        if ($_ -match '^([^=]+)=(.*)$') {
+            [Environment]::SetEnvironmentVariable($matches[1], $matches[2], "Process")
+        }
+    }
+
+    & cl /nologo /LD /MT /EHsc /O2 /std:c++17 /D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS `
+        "/Fo:$objDir\" "$wgcDir\wgc_helper.cpp" "/Fe:$outDll" `
+        /link "/IMPLIB:$objDir\wgc_helper.lib" windowsapp.lib d3d11.lib dxgi.lib ole32.lib user32.lib dwmapi.lib
+    $code = $LASTEXITCODE
+
+    Remove-Item -LiteralPath $objDir -Recurse -Force -ErrorAction SilentlyContinue
+
+    if ($code -ne 0) {
+        Write-Host "wgc_helper.dll build failed (exit $code)" -ForegroundColor Red
+        exit $code
+    }
+    Write-Host "wgc_helper.dll -> $outDll" -ForegroundColor Green
+}
+
 switch ($Command.ToLower()) {
     "run" {
         Write-Host "go run -tags `"$Tags`"" -ForegroundColor Green
@@ -134,9 +177,21 @@ switch ($Command.ToLower()) {
         go build -tags "$Tags" -o $output
         break
     }
+
+    "bench" {
+        Write-Host "go build -tags `"$Tags`" -o capturebench.exe ./cmd/capturebench" -ForegroundColor Green
+        go build -tags "$Tags" -o capturebench.exe ./cmd/capturebench
+        break
+    }
+
+    "wgcdll" {
+        Build-WgcDll
+        break
+    }
     
     default {
         Write-Host "unknown command: $Command" -ForegroundColor Red
+        Write-Host "available commands: run, debug, release, bench, wgcdll" -ForegroundColor Yellow
         exit 1
     }
 }

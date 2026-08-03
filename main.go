@@ -37,6 +37,7 @@ import (
 	"github.com/Miuzarte/GoCVStreamer/ui"
 	w "github.com/Miuzarte/GoCVStreamer/weapon"
 	ws "github.com/Miuzarte/GoCVStreamer/weapons"
+	"github.com/Miuzarte/GoCVStreamer/wgc"
 	"github.com/Miuzarte/GoCVStreamer/widgets"
 	"github.com/fsnotify/fsnotify"
 	"github.com/getcharzp/go-vision/yolo26"
@@ -56,7 +57,8 @@ var (
 	autodisplay = flag.Bool("autodisplay", false, "skip display selection, auto-select largest")
 	noopencv    = flag.Bool("noopencv", false, "disable OpenCV template matching")
 	game        = flag.String("game", "r6s", "game mode: r6s, cs2")
-	source      = flag.String("source", "dxgi", "capture source: dxgi, obs")
+	source      = flag.String("source", "auto", "capture source: dxgi, obs, wgc, auto (DXGI preferred, WGC fallback)")
+	winname     = flag.String("window", "", "WGC window capture: process name or window title; 'auto' = current game process")
 	obsIndex    = flag.Int("obsindex", 0, "OBS Virtual Camera device index")
 	obsWidth    = flag.Int("obswidth", 0, "OBS Virtual Camera width (0=default)")
 	obsHeight   = flag.Int("obsheight", 0, "OBS Virtual Camera height (0=default)")
@@ -164,12 +166,42 @@ func selectDisplay() {
 	case "obs":
 		src, err = capturer.NewObsCamera(*obsIndex, *obsWidth, *obsHeight)
 	default:
+		windowMode := *winname != ""
 		var displayIndex int
-		displayIndex, err = selectDisplayInteractive()
-		if err != nil {
-			log.Panic().Err(err).Msg("failed to select display")
+		if !windowMode {
+			displayIndex, err = selectDisplayInteractive()
+			if err != nil {
+				log.Panic().Err(err).Msg("failed to select display")
+			}
 		}
-		src, err = capturer.New(displayIndex)
+
+		switch {
+		case windowMode:
+			// 窗口采集只有 WGC 支持，auto 也走 WGC。
+			if *source != "wgc" && *source != "auto" {
+				err = fmt.Errorf("window capture requires -source wgc or auto")
+				break
+			}
+			// debug 构建保留 WGC 黄色边框便于确认捕获区域；release 隐藏（同 OBS 行为）。
+			wgc.SetBorderless(!debugging)
+			src, err = newWgcWindowSource()
+
+		case *source == "wgc":
+			// debug 构建保留 WGC 黄色边框便于确认捕获区域；release 隐藏（同 OBS 行为）。
+			wgc.SetBorderless(!debugging)
+			src, err = wgc.NewDisplaySource(displayIndex)
+
+		default:
+			// dxgi 显式选择，或 auto（默认）：优先 DXGI，失败时回退 WGC。
+			src, err = capturer.New(displayIndex)
+			if err != nil && *source == "auto" {
+				log.Warn().
+					Err(err).
+					Msg("DXGI unavailable, falling back to WGC")
+				wgc.SetBorderless(!debugging)
+				src, err = wgc.NewDisplaySource(displayIndex)
+			}
+		}
 	}
 	if err != nil {
 		log.Panic().Err(err).Msg("failed to create capture source")
@@ -191,9 +223,37 @@ func selectDisplay() {
 	}
 	capturerServer = capturer.NewServer(src, cfg, MATCHING_MODE, func() {
 		if window != nil && !*nogui {
+			window.SetBounds(capturerServer.Bounds().Max)
 			window.App().Invalidate()
 		}
 	})
+}
+
+// newWgcWindowSource 创建 WGC 窗口采集源。
+// -window auto 时按 -game 的进程名查找；否则按进程名或窗口标题查找。
+func newWgcWindowSource() (capturer.Source, error) {
+	var procNames []string
+	var title string
+	if *winname == "auto" {
+		procNames = gameProcessNames(*game)
+	} else {
+		procNames = []string{*winname}
+		title = *winname
+	}
+
+	hwnd, err := wgc.FindWindow(procNames, title)
+	if err != nil {
+		return nil, err
+	}
+	log.Info().
+		Str("window", *winname).
+		Uint64("hwnd", uint64(hwnd)).
+		Msg("wgc window capture target")
+
+	lookup := func() (windows.HWND, error) {
+		return wgc.FindWindow(procNames, title)
+	}
+	return wgc.NewWindowSource(hwnd, true, lookup)
 }
 
 func selectDisplayInteractive() (int, error) {

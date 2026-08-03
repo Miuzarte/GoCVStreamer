@@ -2,6 +2,7 @@ package capturer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -170,6 +171,11 @@ func (s *Server) Run(ctx context.Context) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
+	log.Info().
+		Int("width", s.source.Bounds().Dx()).
+		Int("height", s.source.Bounds().Dy()).
+		Msg("capture server started")
+
 	rawRGBA := image.NewRGBA(s.source.Bounds())
 
 	for {
@@ -192,7 +198,13 @@ func (s *Server) Run(ctx context.Context) {
 		tStart := time.Now()
 
 		err := s.source.GetImageTimeout(rawRGBA, uint(timeoutMs))
-		if err == outputduplication.ErrNoImageYet {
+		if errors.Is(err, outputduplication.ErrNoImageYet) {
+			continue
+		}
+		if errors.Is(err, ErrSizeChanged) {
+			log.Info().
+				Msg("capture size changed, rebuilding frame buffers")
+			s.reallocBuffers(&rawRGBA)
 			continue
 		}
 		if err != nil {
@@ -242,6 +254,24 @@ func (s *Server) Run(ctx context.Context) {
 			time.Sleep(interval - elapsed)
 		}
 	}
+}
+
+// reallocBuffers 按采集源当前尺寸重建帧缓冲（分辨率变化时调用）。
+func (s *Server) reallocBuffers(rawRGBA **image.RGBA) {
+	bounds := s.source.Bounds()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	*rawRGBA = image.NewRGBA(bounds)
+	s.screenRGBA = image.NewRGBA(bounds)
+	if !s.noOpenCV {
+		s.frameMatRGBAInter.Close()
+		s.frameMatRGBAInter = gocv.NewMatWithSize(bounds.Dy(), bounds.Dx(), gocv.MatTypeCV8UC4)
+	}
+	log.Info().
+		Int("width", bounds.Dx()).
+		Int("height", bounds.Dy()).
+		Msg("frame buffers rebuilt")
 }
 
 func (s *Server) Close() error {

@@ -1,0 +1,31 @@
+{
+    "configurations": [
+        {
+            "name": "Win32",
+            "includePath": [
+                "${default}",
+                "${workspaceFolder}/**",
+                "B:/Program Files/Microsoft Visual Studio/2022/VC/Tools/MSVC/14.44.35207/include",
+                "C:/Program Files (x86)/Windows Kits/10/Include/10.0.28000.0/ucrt",
+                "C:/Program Files (x86)/Windows Kits/10/Include/10.0.28000.0/um",
+                "C:/Program Files (x86)/Windows Kits/10/Include/10.0.28000.0/shared",
+                "C:/Program Files (x86)/Windows Kits/10/Include/10.0.28000.0/cppwinrt",
+                "B:/Lib/opencv_build/install/include"
+            ],
+            "defines": [
+                "_DEBUG",
+                "UNICODE",
+                "_UNICODE",
+                "WIN32",
+                "_WIN32",
+                "NOMINMAX"
+            ],
+            "windowsSdkVersion": "10.0.28000.0",
+            "compilerPath": "B:/Program Files/Microsoft Visual Studio/2022/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/cl.exe",
+            "cStandard": "c17",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "windows-msvc-x64"
+        }
+    ],
+    "version": 4
+}

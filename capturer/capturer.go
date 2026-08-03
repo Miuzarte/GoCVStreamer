@@ -1,6 +1,7 @@
 package capturer
 
 import (
+	"errors"
 	"fmt"
 	"image"
 	"sync"
@@ -14,6 +15,9 @@ import (
 )
 
 var log = logger.New("Capturer")
+
+// ErrSizeChanged 表示采集源的分辨率发生变化，调用方应重建帧缓冲。
+var ErrSizeChanged = errors.New("capture source size changed")
 
 type DxgiDesktopDuplicator struct {
 	framesElapsed int
@@ -126,6 +130,11 @@ func (ss *DxgiDesktopDuplicator) GetImageTimeout(img *image.RGBA, timeoutMs uint
 }
 
 func (ss *DxgiDesktopDuplicator) getImageTimeout(img *image.RGBA, timeoutMs uint) error {
+	b := img.Bounds()
+	if b.Dx() != ss.screenBounds.Dx() || b.Dy() != ss.screenBounds.Dy() {
+		return ErrSizeChanged
+	}
+
 	err := ss.ddup.GetImage(img, timeoutMs)
 	if err == nil {
 		ss.framesElapsed++
