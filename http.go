@@ -73,9 +73,11 @@ func snapshotMetrics() (m MetricsSnapshot) {
 		m.WeaponVal = s.Confidence
 
 		if s.Found {
-			weap := recoilEngine.Weapon()
-			if weap != nil {
-				m.CurrentWeapon = weap.String()
+			res := matcherEngine.Result()
+			idx := res.WeaponIndex
+			wps := matcherEngine.Weapons()
+			if idx >= 0 && idx < len(wps) {
+				m.CurrentWeapon = wps[idx].String()
 			}
 		}
 	}

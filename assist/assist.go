@@ -49,6 +49,7 @@ type Engine struct {
 	bounds  image.Rectangle
 	sources []detector.Source
 	keys    *keystate.Tracker
+	mover   mouse.Mover
 
 	foregroundAllowed func() bool
 
@@ -56,12 +57,16 @@ type Engine struct {
 	isActive  bool
 }
 
-func New(cfg Config, sources []detector.Source, bounds image.Rectangle) *Engine {
+func New(cfg Config, sources []detector.Source, bounds image.Rectangle, mover mouse.Mover) *Engine {
+	if mover == nil {
+		mover = mouse.LocalMover{}
+	}
 	return &Engine{
 		cfg:     cfg,
 		bounds:  bounds,
 		sources: sources,
 		keys:    keystate.NewTracker(),
+		mover:   mover,
 	}
 }
 
@@ -310,7 +315,7 @@ func (e *Engine) Tick() {
 	e.mu.Unlock()
 
 	if dx != 0 || dy != 0 {
-		mouse.MoveAndMark(dx, dy)
+		e.mover.MoveAndMark(dx, dy)
 	}
 }
 

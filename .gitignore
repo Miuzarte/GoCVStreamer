@@ -13,3 +13,5 @@ config.ini
 # *.code-workspace
 *.exe
 *.dll
+
+docs/

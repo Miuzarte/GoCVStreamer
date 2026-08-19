@@ -4,7 +4,19 @@
 			"path": "."
 		},
 		{
+			"path": "../mhub-go"
+		},
+		{
+			"path": "../mhub-logi"
+		},
+		{
+			"path": "../logi-hidpp"
+		},
+		{
 			"path": "../Inferencer"
+		},
+		{
+			"path": "../WORD"
 		},
 		{
 			"path": "../go-vision"

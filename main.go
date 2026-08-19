@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -32,7 +33,7 @@ import (
 	"github.com/Miuzarte/GoCVStreamer/logger"
 	"github.com/Miuzarte/GoCVStreamer/matcher"
 	"github.com/Miuzarte/GoCVStreamer/mouse"
-	"github.com/Miuzarte/GoCVStreamer/recoil"
+	"github.com/Miuzarte/GoCVStreamer/remoteclient"
 	"github.com/Miuzarte/GoCVStreamer/sender"
 	"github.com/Miuzarte/GoCVStreamer/ui"
 	w "github.com/Miuzarte/GoCVStreamer/weapon"
@@ -69,6 +70,8 @@ var (
 	streamCrop    = flag.Int("streamcrop", 1280, "WebSocket stream center crop size (-1=screen short edge, 0=no crop)")
 	nosender      = flag.Bool("nosender", false, "disable WebSocket stream server")
 	streamTtl     = flag.Int("streamttl", 500, "remote results TTL in ms (0 disables remote results)")
+
+	mhubAddr = flag.String("mhub-addr", "", "mhub remote injection address (e.g. 127.0.0.1:9000, empty = local injection)")
 )
 
 var log = logger.New("Streamer")
@@ -108,7 +111,6 @@ var (
 	matcherEngine    *matcher.Engine
 	detectorEngine   *detector.Engine
 	remoteSource     *detector.RemoteSource
-	recoilEngine     *recoil.Engine
 	assistEngine     *assist.Engine
 	window           *ui.Window
 	inferenceSources []detector.Source
@@ -116,6 +118,19 @@ var (
 	cpu         float64
 	forceUpdate bool
 )
+
+// statePusher 是远程状态推送接口, 由 remoteclient.Client 实现;
+// 本地注入模式 (LocalMover) 不实现, 状态推送为 no-op
+type statePusher interface {
+	SetRemoteState(key string, value any) error
+	Eval(expr string) error
+}
+
+// mover 是鼠标注入器, 本地或远程
+var mover mouse.Mover = mouse.LocalMover{}
+
+// weaponAlt 是否使用武器备选速度档 (Alt+Insert 切换, 复刻原 recoil 行为)
+var weaponAlt atomic.Bool
 
 var _ = debuggingWaitForInput()
 
@@ -366,6 +381,15 @@ func main() {
 	cwg.WithSignal(syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
 	defer cwg.Cancel()
 
+	if *mhubAddr != "" {
+		client := remoteclient.Dial(*mhubAddr)
+		defer client.Close()
+		mover = client
+		log.Info().
+			Str("addr", *mhubAddr).
+			Msg("mhub remote injection enabled")
+	}
+
 	if !*nohttp {
 		cwg.Go(func(ctx context.Context) {
 			startHttpServer(ctx, *httpPort)
@@ -414,12 +438,6 @@ func main() {
 			Debugging: debugging,
 		}
 		matcherEngine = matcher.New(capturerServer, matcherCfg)
-
-		clicker := mouse.NewClicker(cwg.Ctx)
-		recoilCfg := recoil.Config{
-			Debugging: debugging,
-		}
-		recoilEngine = recoil.New(clicker, recoilCfg)
 	}
 
 	if !*noyolo {
@@ -467,7 +485,7 @@ func main() {
 				}
 				assistCfg.RequireMouseMove = false
 			}
-			assistEngine = assist.New(assistCfg, inferenceSources, capturerServer.Bounds())
+			assistEngine = assist.New(assistCfg, inferenceSources, capturerServer.Bounds(), mover)
 			assistEngine.SetForegroundAllowed(func() bool {
 				return assistForegroundAllowed.Load()
 			})
@@ -511,6 +529,7 @@ func main() {
 
 	if matcherEngine != nil {
 		cwg.Go(r6sLoop)
+		cwg.Go(weaponAltLoop)
 	}
 	cwg.Go(cpuMeasureLoop)
 	cwg.Go(tmplWatchLoop)
@@ -607,11 +626,9 @@ func r6sLoop(ctx context.Context) {
 		}
 
 		lastIndex = newIndex
-		recoilEngine.SetWeapon(to)
+		// 推送武器状态到 mhub (远程模式); 本地模式 no-op
+		pushWeaponState(to, toName, debugging)
 	}
-
-	ticker := time.NewTicker(time.Second / 125)
-	defer ticker.Stop()
 
 	for {
 		select {
@@ -619,8 +636,82 @@ func r6sLoop(ctx context.Context) {
 			return
 		case newIndex := <-matcherEngine.ResultCh():
 			applyWeapon(newIndex)
+		}
+	}
+}
+
+// pushWeaponState 把当前武器类型与速度参数推送给 mhub 脚本
+// weapon 为 nil 时推送 "none"
+func pushWeaponState(to *w.Weapon, name string, debug bool) {
+	pusher, ok := mover.(statePusher)
+	if !ok {
+		return
+	}
+
+	weaponType := "none"
+	faSpeed, faFrac, saSpeed, saFrac := 0, 0, 0, 0
+	if to != nil {
+		typ := to.Class.Detail().Type
+		spMain, spMainF, spAlt, spAltF := to.GetAllSpeeds(debug)
+		useAlt := weaponAlt.Load()
+		if typ.Has(w.TYPE_FULL_AUTO) {
+			weaponType = "full"
+			faSpeed, faFrac = spMain, int(spMainF)
+			if useAlt {
+				faSpeed, faFrac = spAlt, int(spAltF)
+			}
+		} else if typ.Has(w.TYPE_SEMI_AUTO) {
+			weaponType = "semi"
+			saSpeed, saFrac = spMain, int(spMainF)
+			if useAlt {
+				saSpeed, saFrac = spAlt, int(spAltF)
+			}
+		}
+	}
+
+	pusher.SetRemoteState("weapon_type", weaponType)
+	pusher.SetRemoteState("FAspeed", float64(faSpeed))
+	pusher.SetRemoteState("FAfrac", faFrac)
+	pusher.SetRemoteState("SAspeed", float64(saSpeed))
+	pusher.SetRemoteState("SAfrac", saFrac)
+
+	log.Debug().
+		Str("weapon_type", weaponType).
+		Int("fa_speed", faSpeed).
+		Int("fa_frac", faFrac).
+		Int("sa_speed", saSpeed).
+		Int("sa_frac", saFrac).
+		Msg("weapon state pushed")
+}
+
+// altTracker 检测 Alt+Insert 切换武器备选速度档 (复刻原 recoil 行为)
+var altTracker = keystate.NewTracker()
+
+func weaponAltLoop(ctx context.Context) {
+	ticker := time.NewTicker(time.Second / 50)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
 		case <-ticker.C:
-			recoilEngine.Tick()
+			if !keystate.IsDown(keystate.VK_MENU) {
+				continue
+			}
+			if !altTracker.Pressed(keystate.VK_INSERT) {
+				continue
+			}
+			next := !weaponAlt.Load()
+			weaponAlt.Store(next)
+			log.Info().Bool("weaponAlt", next).Msg("weapon alt toggled")
+			// Alt 档切换后重推当前武器状态
+			idx := matcherEngine.WeaponIndex()
+			if idx >= 0 {
+				wps := matcherEngine.Weapons()
+				if idx < len(wps) {
+					pushWeaponState(wps[idx], wps[idx].String(), debugging)
+				}
+			}
 		}
 	}
 }
@@ -850,14 +941,6 @@ func (d *metricsDrawer) Draw(gtx layout.Context, s ui.DScale) {
 			sb.WriteString("|A|: ")
 		}
 		sb.Write(d.inputBuf.Bytes())
-		sb.WriteByte('\n')
-	}
-
-	if recoilEngine != nil {
-		wp := recoilEngine.Weapon()
-		recoilEngine.DisplayState(&sb)
-		sb.WriteByte('\n')
-		wp.DisplaySpeed(&sb, debugging)
 		sb.WriteByte('\n')
 	}
 
