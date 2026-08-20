@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"fmt"
 	"image"
 	"image/draw"
@@ -207,7 +207,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		}
 
 		var res RemoteResult
-		if err := json.Unmarshal(data, &res); err != nil {
+		if err := jsonv2.Unmarshal(data, &res); err != nil {
 			log.Debug().Err(err).Msg("bad result json")
 			continue
 		}

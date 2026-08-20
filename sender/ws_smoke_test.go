@@ -3,7 +3,7 @@ package sender_test
 import (
 	"context"
 	"encoding/binary"
-	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"image"
 	"image/color"
 	"image/draw"
@@ -111,7 +111,7 @@ func TestWebSocketLifecycle(t *testing.T) {
 		}},
 		InferenceMs: 18.5,
 	}
-	payload, _ := json.Marshal(res)
+	payload, _ := jsonv2.Marshal(res)
 	writeCtx, writeCancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer writeCancel()
 	if err := c.Write(writeCtx, websocket.MessageText, payload); err != nil {

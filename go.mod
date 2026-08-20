@@ -1,6 +1,6 @@
 module github.com/Miuzarte/GoCVStreamer
 
-go 1.26.5
+go 1.27.0
 
 require (
 	gioui.org v0.10.1

@@ -669,18 +669,18 @@ func pushWeaponState(to *w.Weapon, name string, debug bool) {
 		}
 	}
 
-	pusher.SetRemoteState("weapon_type", weaponType)
-	pusher.SetRemoteState("FAspeed", float64(faSpeed))
-	pusher.SetRemoteState("FAfrac", faFrac)
-	pusher.SetRemoteState("SAspeed", float64(saSpeed))
-	pusher.SetRemoteState("SAfrac", saFrac)
+	pusher.SetRemoteState("WeaponType", weaponType)
+	pusher.SetRemoteState("FaSpeed", faSpeed)
+	pusher.SetRemoteState("FaFrac", faFrac)
+	pusher.SetRemoteState("SaSpeed", saSpeed)
+	pusher.SetRemoteState("SaFrac", saFrac)
 
 	log.Debug().
-		Str("weapon_type", weaponType).
-		Int("fa_speed", faSpeed).
-		Int("fa_frac", faFrac).
-		Int("sa_speed", saSpeed).
-		Int("sa_frac", saFrac).
+		Str("WeaponType", weaponType).
+		Int("FaSpeed", faSpeed).
+		Int("FaFrac", faFrac).
+		Int("SaSpeed", saSpeed).
+		Int("SaFrac", saFrac).
 		Msg("weapon state pushed")
 }
 
@@ -964,7 +964,8 @@ func createShortcuts(receiver any) widgets.Shortcuts {
 		return widgets.Shortcuts{}
 	}
 
-	return widgets.NewShortcuts(receiver,
+	return widgets.NewShortcuts(
+		receiver,
 		widgets.NewShortcut(key.NameEscape).
 			Do(func(_ key.Name, _ key.Modifiers) {
 				*nogui = true
@@ -1193,7 +1194,8 @@ func modWeapon(mainOrAlt bool, newSpeed string) {
 		speedAlt = newSpeed
 	}
 
-	newName := fmt.Sprintf("{%s_%s_%s} %s%s",
+	newName := fmt.Sprintf(
+		"{%s_%s_%s} %s%s",
 		orig.Class.ToString(true),
 		speedMain, speedAlt,
 		orig.Name, ext,
@@ -1236,7 +1238,8 @@ func listWeapons() {
 		}
 
 		speedMain, speedMainF, speedAlt, speedAltF := w.GetAllSpeeds(debugging)
-		fmt.Fprintf(os.Stdout,
+		fmt.Fprintf(
+			os.Stdout,
 			"[%0*d] {%s_%02d.%d_%02d.%d} %-*s %.2f%%\n",
 			indexLength, i,
 			w.Class.ToString(true),

@@ -2,7 +2,8 @@ package main
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	jsonv2 "encoding/json/v2"
 	"net/http"
 	"runtime/debug"
 	"time"
@@ -134,9 +135,13 @@ func startHttpServer(ctx context.Context, addr string) {
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
 		m := snapshotMetrics()
 		w.Header().Set("Content-Type", "application/json")
-		enc := json.NewEncoder(w)
-		enc.SetIndent("", "  ")
-		enc.Encode(m)
+		data, err := jsonv2.Marshal(m, jsontext.WithIndent("  "))
+		if err != nil {
+			http.Error(w, "marshal metrics: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		data = append(data, '\n')
+		_, _ = w.Write(data)
 	})
 
 	srv := &http.Server{Addr: addr, Handler: mux}

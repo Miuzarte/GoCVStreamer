@@ -4,6 +4,7 @@ package remoteclient
 
 import (
 	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"fmt"
 	"net"
 	"sync"
@@ -27,15 +28,15 @@ func buttonToMhub(button int) int {
 // remoteMsg 与 mhub remoteMsg 一致, 换行分隔 JSON
 type remoteMsg struct {
 	T      string          `json:"t"`
-	Dx     int32           `json:"dx,omitempty"`
-	Dy     int32           `json:"dy,omitempty"`
-	Mark   bool            `json:"mark,omitempty"`
-	B      int             `json:"b,omitempty"`
-	Down   bool            `json:"down,omitempty"`
-	Clicks int32           `json:"clicks,omitempty"`
-	Key    string          `json:"key,omitempty"`
-	Value  json.RawMessage `json:"value,omitempty"`
-	Expr   string          `json:"expr,omitempty"`
+	Dx     int32           `json:"dx,omitzero"`
+	Dy     int32           `json:"dy,omitzero"`
+	Mark   bool            `json:"mark,omitzero"`
+	B      int             `json:"b,omitzero"`
+	Down   bool            `json:"down,omitzero"`
+	Clicks int32           `json:"clicks,omitzero"`
+	Key    string          `json:"key,omitzero"`
+	Value  json.RawMessage `json:"value,omitzero"`
+	Expr   string          `json:"expr,omitzero"`
 }
 
 // Client 是远程注入客户端, 实现 mouse.Mover,
@@ -103,7 +104,7 @@ func (c *Client) send(msg remoteMsg) error {
 				continue
 			}
 		}
-		data, err := json.Marshal(msg)
+		data, err := jsonv2.Marshal(msg)
 		if err != nil {
 			return err
 		}
@@ -158,7 +159,7 @@ func (c *Client) MouseClick(button int) error {
 
 // SetRemoteState 推送命名状态, mhub 会以 "key = value" 形式注入脚本全局变量
 func (c *Client) SetRemoteState(key string, value any) error {
-	raw, err := json.Marshal(value)
+	raw, err := jsonv2.Marshal(value)
 	if err != nil {
 		return fmt.Errorf("remoteclient: marshal state %q: %w", key, err)
 	}

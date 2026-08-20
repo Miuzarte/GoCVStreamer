@@ -2,7 +2,7 @@ package remoteclient
 
 import (
 	"bufio"
-	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"net"
 	"strings"
 	"testing"
@@ -52,7 +52,7 @@ func TestClientMove(t *testing.T) {
 		t.Fatalf("Move: %v", err)
 	}
 	var msg remoteMsg
-	if err := json.Unmarshal([]byte(recvMsg(t, got)), &msg); err != nil {
+	if err := jsonv2.Unmarshal([]byte(recvMsg(t, got)), &msg); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if msg.T != "move" || msg.Dx != 3 || msg.Dy != -2 || msg.Mark {
@@ -69,7 +69,7 @@ func TestClientMoveAndMark(t *testing.T) {
 		t.Fatalf("MoveAndMark: %v", err)
 	}
 	var msg remoteMsg
-	if err := json.Unmarshal([]byte(recvMsg(t, got)), &msg); err != nil {
+	if err := jsonv2.Unmarshal([]byte(recvMsg(t, got)), &msg); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if msg.T != "move" || msg.Dx != 5 || msg.Dy != 7 || !msg.Mark {
@@ -88,7 +88,7 @@ func TestClientButtons(t *testing.T) {
 	raw1 := recvMsg(t, got)
 	t.Logf("raw1: %q", raw1)
 	var msg1 remoteMsg
-	if err := json.Unmarshal([]byte(raw1), &msg1); err != nil {
+	if err := jsonv2.Unmarshal([]byte(raw1), &msg1); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if msg1.T != "btn" || msg1.B != 1 || !msg1.Down {
@@ -101,7 +101,7 @@ func TestClientButtons(t *testing.T) {
 	raw2 := recvMsg(t, got)
 	t.Logf("raw2: %q", raw2)
 	var msg2 remoteMsg
-	if err := json.Unmarshal([]byte(raw2), &msg2); err != nil {
+	if err := jsonv2.Unmarshal([]byte(raw2), &msg2); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if msg2.T != "btn" || msg2.B != 2 || msg2.Down {
@@ -114,7 +114,7 @@ func TestClientButtons(t *testing.T) {
 	raw3 := recvMsg(t, got)
 	t.Logf("raw3: %q", raw3)
 	var msg3 remoteMsg
-	if err := json.Unmarshal([]byte(raw3), &msg3); err != nil {
+	if err := jsonv2.Unmarshal([]byte(raw3), &msg3); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if msg3.T != "btn" || msg3.B != 3 || !msg3.Down {
@@ -123,7 +123,7 @@ func TestClientButtons(t *testing.T) {
 	raw4 := recvMsg(t, got)
 	t.Logf("raw4: %q", raw4)
 	var msg4 remoteMsg
-	if err := json.Unmarshal([]byte(raw4), &msg4); err != nil {
+	if err := jsonv2.Unmarshal([]byte(raw4), &msg4); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if msg4.T != "btn" || msg4.B != 3 || msg4.Down {
@@ -185,7 +185,7 @@ func TestClientReconnect(t *testing.T) {
 		t.Fatalf("Move: %v", err)
 	}
 	var msg remoteMsg
-	if err := json.Unmarshal([]byte(recvMsg(t, got2)), &msg); err != nil {
+	if err := jsonv2.Unmarshal([]byte(recvMsg(t, got2)), &msg); err != nil {
 		t.Fatalf("unmarshal after reconnect: %v", err)
 	}
 	if msg.T != "move" || !strings.Contains(addr, "127.0.0.1") {
@@ -198,18 +198,18 @@ func TestClientSetRemoteState(t *testing.T) {
 	c := Dial(addr)
 	defer c.Close()
 
-	if err := c.SetRemoteState("weapon_type", "full"); err != nil {
+	if err := c.SetRemoteState("WeaponType", "full"); err != nil {
 		t.Fatalf("SetRemoteState: %v", err)
 	}
 	var msg remoteMsg
-	if err := json.Unmarshal([]byte(recvMsg(t, got)), &msg); err != nil {
+	if err := jsonv2.Unmarshal([]byte(recvMsg(t, got)), &msg); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if msg.T != "state" || msg.Key != "weapon_type" {
+	if msg.T != "state" || msg.Key != "WeaponType" {
 		t.Fatalf("state msg = %+v", msg)
 	}
 	var v string
-	if err := json.Unmarshal(msg.Value, &v); err != nil {
+	if err := jsonv2.Unmarshal(msg.Value, &v); err != nil {
 		t.Fatalf("value: %v", err)
 	}
 	if v != "full" {
@@ -226,7 +226,7 @@ func TestClientEval(t *testing.T) {
 		t.Fatalf("Eval: %v", err)
 	}
 	var msg remoteMsg
-	if err := json.Unmarshal([]byte(recvMsg(t, got)), &msg); err != nil {
+	if err := jsonv2.Unmarshal([]byte(recvMsg(t, got)), &msg); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if msg.T != "eval" || msg.Expr != "SpeedOffset = 3" {
