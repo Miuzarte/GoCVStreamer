@@ -6,7 +6,7 @@ const kFilterBilinear = 2
 
 // ResizeRGBA 使用 libyuv ARGBScale 做双线性缩放
 //
-// src 必须是已拷贝的独立图像, 函数会原地修改其 Pix（RGBA <-> ARGB 转换）
+// src 必须是已拷贝的独立图像, 函数会原地修改其 Pix (RGBA <-> ARGB 转换)
 func ResizeRGBA(src *image.RGBA, w, h int) *image.RGBA {
 	dst := image.NewRGBA(image.Rect(0, 0, w, h))
 	ResizeRGBAInto(dst, src, w, h)

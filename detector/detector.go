@@ -39,7 +39,7 @@ type Config struct {
 	// https://github.com/ultralytics/ultralytics/blob/main/ultralytics/cfg/datasets/coco.yaml
 	ResultIds utils.Set[int]
 
-	CropSize int // 中心裁剪边长：-1=屏幕短边（自动），0=不裁剪，>0=固定值
+	CropSize int // 中心裁剪边长: -1=屏幕短边 (自动), 0=不裁剪, >0=固定值
 }
 
 func DefaultConfig() Config {
@@ -139,7 +139,7 @@ func (e *Engine) Detect(img image.Image) error {
 	return nil
 }
 
-// Snapshot 实现 Source 接口：返回本地结果（屏幕坐标系）与最近一次推理延迟。
+// Snapshot 实现 Source 接口: 返回本地结果 (屏幕坐标系) 与最近一次推理延迟
 func (e *Engine) Snapshot() (results []Result, latency time.Duration, fresh bool) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -199,7 +199,7 @@ func (e *Engine) Run(ctx context.Context) {
 	cropOffset := image.Pt(0, 0)
 	cropNeeded := false
 	if cropSize < 0 {
-		// -1：自动使用屏幕短边（横屏下即屏幕高度），视野最大且保持正方形。
+		// -1: 自动使用屏幕短边 (横屏下即屏幕高度), 视野最大且保持正方形
 		cropSize = min(bounds.Dx(), bounds.Dy())
 	} else if cropSize > 0 {
 		cropSize = min(cropSize, bounds.Dx(), bounds.Dy())

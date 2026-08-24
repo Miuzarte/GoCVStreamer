@@ -112,7 +112,7 @@ func (s *Server) ReadRgba() *image.RGBA {
 	return s.frame.rgba
 }
 
-// CloneRgba 返回最新 RGBA 帧的深拷贝（供其他 goroutine 编码/发送用）。
+// CloneRgba 返回最新 RGBA 帧的深拷贝 (供其他 goroutine 编码/发送用)
 func (s *Server) CloneRgba() *image.RGBA {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -130,8 +130,8 @@ func (s *Server) ReadMat() gocv.Mat {
 	return s.frame.mat
 }
 
-// CloneMat 返回最新 OpenCV Mat 的深拷贝（供其他 goroutine 编码/发送用）。
-// 第二个返回值表示是否可用（noopencv 模式下为空）。
+// CloneMat 返回最新 OpenCV Mat 的深拷贝 (供其他 goroutine 编码/发送用)
+// 第二个返回值表示是否可用 (noopencv 模式下为空)
 func (s *Server) CloneMat() (gocv.Mat, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -256,7 +256,7 @@ func (s *Server) Run(ctx context.Context) {
 	}
 }
 
-// reallocBuffers 按采集源当前尺寸重建帧缓冲（分辨率变化时调用）。
+// reallocBuffers 按采集源当前尺寸重建帧缓冲 (分辨率变化时调用)
 func (s *Server) reallocBuffers(rawRGBA **image.RGBA) {
 	bounds := s.source.Bounds()
 	s.mu.Lock()

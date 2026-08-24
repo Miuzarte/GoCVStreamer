@@ -11,7 +11,7 @@ import (
 	"github.com/getcharzp/go-vision/yolo26"
 )
 
-// Kind 推理结果来源。
+// Kind 推理结果来源
 type Kind int
 
 const (
@@ -19,22 +19,22 @@ const (
 	KindRemote
 )
 
-// Result 带来源与延迟的检测结果。
-// Latency：本地=推理耗时；远程=帧发出到收到结果的全链路延迟（含网络+手机推理）。
+// Result 带来源与延迟的检测结果
+// Latency: 本地=推理耗时; 远程=帧发出到收到结果的全链路延迟 (含网络+手机推理)
 type Result struct {
 	yolo26.DetResult
 	Kind    Kind
 	Latency time.Duration
 }
 
-// Source 推理源接口（类比 capturer.Source：可以是本地 YOLO、远程 NPU 等）。
+// Source 推理源接口 (类比 capturer.Source: 可以是本地 YOLO, 远程 NPU 等)
 type Source interface {
-	// Snapshot 返回当前结果（拷贝）、该批结果对应延迟与是否新鲜。
+	// Snapshot 返回当前结果 (拷贝), 该批结果对应延迟与是否新鲜
 	Snapshot() (results []Result, latency time.Duration, fresh bool)
 	Close() error
 }
 
-// RemoteSource 远程（手机端 NPU）推理源：结果由 WebSocket 回调写入。
+// RemoteSource 远程 (手机端 NPU) 推理源: 结果由 WebSocket 回调写入
 type RemoteSource struct {
 	ttl time.Duration
 
@@ -51,7 +51,7 @@ func NewRemoteSource(ttl time.Duration) *RemoteSource {
 	return &RemoteSource{ttl: ttl}
 }
 
-// SetResults 由远程回调写入（屏幕坐标系）；latency 为该帧全链路延迟。
+// SetResults 由远程回调写入 (屏幕坐标系); latency 为该帧全链路延迟
 func (s *RemoteSource) SetResults(dets []yolo26.DetResult, latency time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -74,7 +74,7 @@ func (s *RemoteSource) Snapshot() ([]Result, time.Duration, bool) {
 
 func (s *RemoteSource) Close() error { return nil }
 
-// Drawer 聚合绘制多个推理源：本地绿框、远程青框。
+// Drawer 聚合绘制多个推理源: 本地绿框, 远程青框
 type Drawer struct {
 	Sources []Source
 }

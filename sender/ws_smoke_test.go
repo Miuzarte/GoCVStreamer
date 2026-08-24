@@ -17,7 +17,7 @@ import (
 	"gocv.io/x/gocv"
 )
 
-// fakeSource 是 capturer.Source 的最小实现：输出固定纯色帧。
+// fakeSource 是 capturer.Source 的最小实现: 输出固定纯色帧
 type fakeSource struct {
 	bounds image.Rectangle
 }
@@ -39,8 +39,8 @@ func (f *fakeSource) FramesElapsed() int        { return 0 }
 func (f *fakeSource) ResetFramesElapsed()       {}
 func (f *fakeSource) Close() error              { return nil }
 
-// TestWebSocketLifecycle 覆盖 sender 的完整生命周期：
-// 握手 → 推流 → 回传结果 → 客户端断开清理 → ctx 取消后 Run 退出并释放端口。
+// TestWebSocketLifecycle 覆盖 sender 的完整生命周期:
+// 握手 → 推流 → 回传结果 → 客户端断开清理 → ctx 取消后 Run 退出并释放端口
 func TestWebSocketLifecycle(t *testing.T) {
 	const addr = "127.0.0.1:19091"
 
@@ -90,7 +90,7 @@ func TestWebSocketLifecycle(t *testing.T) {
 	}
 	defer c.CloseNow()
 
-	// 2. 收到推流帧（[4B frame_id LE][JPEG]）
+	// 2. 收到推流帧 ([4B frame_id LE][JPEG])
 	readCtx, readCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer readCancel()
 	mt, data, err := c.Read(readCtx)
@@ -102,7 +102,7 @@ func TestWebSocketLifecycle(t *testing.T) {
 	}
 	frameID := binary.LittleEndian.Uint32(data[:4])
 
-	// 3. 回传检测 JSON，OnResult 应被调用
+	// 3. 回传检测 JSON, OnResult 应被调用
 	res := sender.RemoteResult{
 		FrameID: uint64(frameID),
 		Detections: []sender.RemoteDetection{{
@@ -130,7 +130,7 @@ func TestWebSocketLifecycle(t *testing.T) {
 		t.Fatal("HasClients should be true while connected")
 	}
 
-	// 4. 客户端断开后，服务端应清理连接
+	// 4. 客户端断开后, 服务端应清理连接
 	c.CloseNow()
 	deadline = time.Now().Add(5 * time.Second)
 	for srv.HasClients() {
@@ -140,7 +140,7 @@ func TestWebSocketLifecycle(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 
-	// 5. 取消 ctx：Run 应退出，端口应释放
+	// 5. 取消 ctx: Run 应退出, 端口应释放
 	cancel()
 	select {
 	case <-done:

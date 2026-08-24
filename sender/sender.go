@@ -22,7 +22,7 @@ import (
 
 var log = logger.New("Sender")
 
-// RemoteDetection 是手机端回传的归一化检测框（相对 640×640 流帧）。
+// RemoteDetection 是手机端回传的归一化检测框 (相对 640×640 流帧)
 type RemoteDetection struct {
 	X1        float64 `json:"x1"`
 	Y1        float64 `json:"y1"`
@@ -33,7 +33,7 @@ type RemoteDetection struct {
 	ClassName string  `json:"class_name"`
 }
 
-// RemoteResult 是手机端回传的检测结果 JSON。
+// RemoteResult 是手机端回传的检测结果 JSON
 type RemoteResult struct {
 	FrameID     uint64            `json:"frame_id"`
 	Detections  []RemoteDetection `json:"detections"`
@@ -41,11 +41,11 @@ type RemoteResult struct {
 }
 
 type Config struct {
-	Addr        string // WebSocket 监听地址，如 ":9090"
+	Addr        string // WebSocket 监听地址, 如 ":9090"
 	Fps         int    // 推流目标帧率
 	JpegQuality int    // JPEG 质量 1-100
-	InputSize   int    // 流帧边长（正方形），默认 640
-	CropSize    int    // 中心裁剪边长：-1=屏幕短边（自动），0=不裁剪，>0=固定值（默认 1280）
+	InputSize   int    // 流帧边长 (正方形), 默认 640
+	CropSize    int    // 中心裁剪边长: -1=屏幕短边 (自动), 0=不裁剪, >0=固定值 (默认 1280)
 }
 
 type Stats struct {
@@ -74,13 +74,13 @@ type Server struct {
 	sentMu sync.Mutex
 	sentAt map[uint32]time.Time
 
-	// 裁剪/缩放元数据（runLoop 初始化后只读）
+	// 裁剪/缩放元数据 (runLoop 初始化后只读)
 	cropSize   int
 	cropOffset image.Point
 	cropNeeded bool
 
-	// OnResult 收到手机端检测 JSON 时回调（nil 时只记 stats）。
-	// 第二个参数是该帧的全链路延迟（帧发出→收到结果）。
+	// OnResult 收到手机端检测 JSON 时回调 (nil 时只记 stats)
+	// 第二个参数是该帧的全链路延迟 (帧发出→收到结果)
 	OnResult func(RemoteResult, time.Duration)
 }
 
@@ -102,11 +102,11 @@ func NewServer(cfg Config, src *capturer.Server) *Server {
 		fp:      fps.NewCounter(time.Second),
 	}
 
-	// 裁剪几何信息在构造时确定（bounds 不变），供 Transform 无锁读取。
+	// 裁剪几何信息在构造时确定 (bounds 不变), 供 Transform 无锁读取
 	bounds := src.Bounds()
 	s.cropSize = cfg.CropSize
 	if s.cropSize < 0 {
-		// -1：自动使用屏幕短边（横屏下即屏幕高度），视野最大且保持正方形。
+		// -1: 自动使用屏幕短边 (横屏下即屏幕高度), 视野最大且保持正方形
 		s.cropSize = min(bounds.Dx(), bounds.Dy())
 	} else if s.cropSize > 0 {
 		s.cropSize = min(s.cropSize, bounds.Dx(), bounds.Dy())
@@ -118,7 +118,7 @@ func NewServer(cfg Config, src *capturer.Server) *Server {
 	return s
 }
 
-// Run 启动 HTTP + 推流循环，阻塞到 ctx 结束。
+// Run 启动 HTTP + 推流循环, 阻塞到 ctx 结束
 func (s *Server) Run(ctx context.Context) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /stream", s.handleWS)
@@ -130,7 +130,7 @@ func (s *Server) Run(ctx context.Context) {
 
 	go func() {
 		<-ctx.Done()
-		s.closeAll() // 先断开所有客户端，让活跃 handler 退出
+		s.closeAll() // 先断开所有客户端, 让活跃 handler 退出
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
@@ -152,7 +152,7 @@ func (s *Server) Run(ctx context.Context) {
 	<-ctx.Done()
 }
 
-// HasClients 是否有手机端在连接（供外部循环决定是否需要推流）。
+// HasClients 是否有手机端在连接 (供外部循环决定是否需要推流)
 func (s *Server) HasClients() bool {
 	s.clientMu.Lock()
 	defer s.clientMu.Unlock()
@@ -172,14 +172,14 @@ func (s *Server) Stats() Stats {
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	remote := r.RemoteAddr
 	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		// 与 goApp/flutterApp 客户端协商压缩；手机 App 无 Origin 限制，全部放行。
+		// 与 goApp/flutterApp 客户端协商压缩; 手机 App 无 Origin 限制, 全部放行
 		CompressionMode: websocket.CompressionContextTakeover,
 		OriginPatterns:  []string{"*"},
 	})
 	if err != nil {
 		return
 	}
-	c.SetReadLimit(1 << 20) // 检测 JSON 足够小，1 MiB 上限
+	c.SetReadLimit(1 << 20) // 检测 JSON 足够小, 1 MiB 上限
 
 	s.clientMu.Lock()
 	s.clients[c] = struct{}{}
@@ -194,8 +194,8 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		Str("remote", remote).
 		Msg("stream client connected")
 
-	// r.Context() 在客户端断开或服务端关闭时自动取消，读循环随之退出，
-	// 不需要再维护手动读超时。
+	// r.Context() 在客户端断开或服务端关闭时自动取消, 读循环随之退出,
+	// 不需要再维护手动读超时
 	ctx := r.Context()
 	for {
 		mt, data, err := c.Read(ctx)
@@ -251,7 +251,7 @@ func (s *Server) closeAll() {
 	s.clients = make(map[*websocket.Conn]struct{})
 }
 
-// runLoop 从捕获源拉帧：中心裁剪 → 缩放 640×640 → JPEG → 广播。
+// runLoop 从捕获源拉帧: 中心裁剪 → 缩放 640×640 → JPEG → 广播
 func (s *Server) runLoop(ctx context.Context) {
 	log.Info().
 		Int("cropSize", s.cropSize).
@@ -273,11 +273,11 @@ func (s *Server) runLoop(ctx context.Context) {
 		}
 
 		if !s.HasClients() {
-			// 无人观看时不推流，也不抬高捕获帧率（保持最低捕获成本）。
+			// 无人观看时不推流, 也不抬高捕获帧率 (保持最低捕获成本)
 			continue
 		}
 
-		// 有客户端时把捕获帧率抬到推流帧率（3 秒窗口，每 tick 续期）。
+		// 有客户端时把捕获帧率抬到推流帧率 (3 秒窗口, 每 tick 续期)
 		s.src.RaiseCeiling(s.cfg.Fps)
 
 		id := s.src.ReadFrameId()
@@ -309,7 +309,7 @@ func (s *Server) runLoop(ctx context.Context) {
 	}
 }
 
-// Broadcast 按协议发送 [4B frame_id LE][JPEG]。
+// Broadcast 按协议发送 [4B frame_id LE][JPEG]
 func (s *Server) Broadcast(frameID uint32, jpegData []byte) {
 	s.clientMu.Lock()
 
@@ -365,12 +365,12 @@ func (s *Server) frameLatency(frameID uint32, now time.Time) (time.Duration, boo
 	return now.Sub(t), true
 }
 
-// Transform 把归一化检测框转换回屏幕坐标（裁剪前全屏坐标系）。
+// Transform 把归一化检测框转换回屏幕坐标 (裁剪前全屏坐标系)
 func (s *Server) Transform(d RemoteDetection) image.Rectangle {
 	ox := float64(s.cropOffset.X)
 	oy := float64(s.cropOffset.Y)
-	// 归一化坐标是相对 640×640 流帧的（已除以 InputSize），
-	// 直接乘以裁剪区边长 cropSize 即得裁剪区像素坐标，再加偏移到全屏。
+	// 归一化坐标是相对 640×640 流帧的 (已除以 InputSize),
+	// 直接乘以裁剪区边长 cropSize 即得裁剪区像素坐标, 再加偏移到全屏
 	return image.Rect(
 		int(d.X1*float64(s.cropSize)+ox+0.5),
 		int(d.Y1*float64(s.cropSize)+oy+0.5),

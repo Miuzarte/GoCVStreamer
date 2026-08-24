@@ -1,0 +1,10 @@
+# 统一换行符: 全部文本文件强制 LF, 与 gofmt 输出一致, 避免工作区 CRLF/LF 混合
+* text=auto eol=lf
+
+# 二进制文件不做行尾转换
+*.dll binary
+*.exe binary
+*.png binary
+*.lib binary
+*.onnx binary
+*.bin binary

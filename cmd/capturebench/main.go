@@ -1,6 +1,6 @@
 // Command capturebench 对 DXGI/WGC 两条采集路径做无下游处理的
-// 延迟与阶段耗时测量：帧间隔、GetImage 总耗时、各阶段耗时、
-// 端到端帧龄（present/合成 -> GetImage 返回）与积压指标。
+// 延迟与阶段耗时测量: 帧间隔, GetImage 总耗时, 各阶段耗时,
+// 端到端帧龄 (present/合成 -> GetImage 返回) 与积压指标
 package main
 
 import (
@@ -185,7 +185,7 @@ func main() {
 	writeCSV(*source, samples)
 }
 
-// printForeground 输出当前前台窗口，用于判断 NVIDIA 后台帧率限制是否可能作用于内容源。
+// printForeground 输出当前前台窗口, 用于判断 NVIDIA 后台帧率限制是否可能作用于内容源
 func printForeground() {
 	hwnd := windows.GetForegroundWindow()
 	if hwnd == 0 {

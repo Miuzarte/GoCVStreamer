@@ -68,10 +68,10 @@ func MoveAndMark(dx, dy int) error {
 	return send(&INPUT{
 		Type: INPUT_MOUSE,
 		Mi: MOUSEINPUT{
-			Dx:           int32(dx),
-			Dy:           int32(dy),
-			DwFlags:      MOUSEEVENTF_MOVE,
-			DwExtraInfo:  uintptr(OurMouseExtraInfo),
+			Dx:          int32(dx),
+			Dy:          int32(dy),
+			DwFlags:     MOUSEEVENTF_MOVE,
+			DwExtraInfo: uintptr(OurMouseExtraInfo),
 		},
 	})
 }

@@ -19,9 +19,9 @@ var (
 	procIsIconic                 = moduser32.NewProc("IsIconic")
 )
 
-// FindWindow 按进程名或窗口标题查找可见、非最小化的窗口。
-// 优先返回前台窗口；否则返回枚举到的第一个匹配窗口。
-// procNames 与 titleSubstr 至少提供一个；进程名大小写不敏感，标题为大小写不敏感的子串匹配。
+// FindWindow 按进程名或窗口标题查找可见, 非最小化的窗口
+// 优先返回前台窗口; 否则返回枚举到的第一个匹配窗口
+// procNames 与 titleSubstr 至少提供一个; 进程名大小写不敏感, 标题为大小写不敏感的子串匹配
 func FindWindow(procNames []string, titleSubstr string) (windows.HWND, error) {
 	if len(procNames) == 0 && titleSubstr == "" {
 		return 0, fmt.Errorf("window lookup: process name or title required")

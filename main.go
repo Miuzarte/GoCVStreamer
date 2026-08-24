@@ -72,6 +72,9 @@ var (
 	streamTtl     = flag.Int("streamttl", 500, "remote results TTL in ms (0 disables remote results)")
 
 	mhubAddr = flag.String("mhub-addr", "", "mhub remote injection address (e.g. 127.0.0.1:9000, empty = local injection)")
+
+	targetTimeout = flag.Duration("target-timeout", 30*time.Minute,
+		"exit when the target game process (-game) is not detected for this long (0 disables)")
 )
 
 var log = logger.New("Streamer")
@@ -119,7 +122,7 @@ var (
 	forceUpdate bool
 )
 
-// statePusher 是远程状态推送接口, 由 remoteclient.Client 实现;
+// statePusher 是远程状态推送接口, 由 remoteclient.Client 实现
 // 本地注入模式 (LocalMover) 不实现, 状态推送为 no-op
 type statePusher interface {
 	SetRemoteState(key string, value any) error
@@ -192,22 +195,22 @@ func selectDisplay() {
 
 		switch {
 		case windowMode:
-			// 窗口采集只有 WGC 支持，auto 也走 WGC。
+			// 窗口采集只有 WGC 支持, auto 也走 WGC
 			if *source != "wgc" && *source != "auto" {
 				err = fmt.Errorf("window capture requires -source wgc or auto")
 				break
 			}
-			// debug 构建保留 WGC 黄色边框便于确认捕获区域；release 隐藏（同 OBS 行为）。
+			// debug 构建保留 WGC 黄色边框便于确认捕获区域; release 隐藏 (同 OBS 行为)
 			wgc.SetBorderless(!debugging)
 			src, err = newWgcWindowSource()
 
 		case *source == "wgc":
-			// debug 构建保留 WGC 黄色边框便于确认捕获区域；release 隐藏（同 OBS 行为）。
+			// debug 构建保留 WGC 黄色边框便于确认捕获区域; release 隐藏 (同 OBS 行为)
 			wgc.SetBorderless(!debugging)
 			src, err = wgc.NewDisplaySource(displayIndex)
 
 		default:
-			// dxgi 显式选择，或 auto（默认）：优先 DXGI，失败时回退 WGC。
+			// dxgi 显式选择, 或 auto (默认): 优先 DXGI, 失败时回退 WGC
 			src, err = capturer.New(displayIndex)
 			if err != nil && *source == "auto" {
 				log.Warn().
@@ -244,8 +247,8 @@ func selectDisplay() {
 	})
 }
 
-// newWgcWindowSource 创建 WGC 窗口采集源。
-// -window auto 时按 -game 的进程名查找；否则按进程名或窗口标题查找。
+// newWgcWindowSource 创建 WGC 窗口采集源
+// -window auto 时按 -game 的进程名查找; 否则按进程名或窗口标题查找
 func newWgcWindowSource() (capturer.Source, error) {
 	var procNames []string
 	var title string
@@ -408,7 +411,7 @@ func main() {
 			dets := make([]yolo26.DetResult, 0, len(res.Detections))
 			for _, d := range res.Detections {
 				if d.Class != 0 {
-					continue // 只接收 person（COCO class 0）
+					continue // 只接收 person (COCO class 0)
 				}
 				dets = append(dets, yolo26.DetResult{
 					ClassID: d.Class,
@@ -533,6 +536,17 @@ func main() {
 	}
 	cwg.Go(cpuMeasureLoop)
 	cwg.Go(tmplWatchLoop)
+
+	// 目标进程看门狗: 持续 targetTimeout 未检测到 -game 进程则退出自身
+	if *targetTimeout > 0 {
+		if names := gameProcessNames(*game); len(names) != 0 {
+			cwg.Go(func(ctx context.Context) {
+				targetProcessLoop(ctx, names, *targetTimeout, cwg.Cancel)
+			})
+		} else {
+			log.Warn().Str("game", *game).Msg("unknown game mode, target process watchdog disabled")
+		}
+	}
 
 	if assistEngine != nil {
 		cwg.Go(assistEngine.Run)

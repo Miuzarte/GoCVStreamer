@@ -16,7 +16,7 @@ import (
 
 var log = logger.New("Capturer")
 
-// ErrSizeChanged 表示采集源的分辨率发生变化，调用方应重建帧缓冲。
+// ErrSizeChanged 表示采集源的分辨率发生变化, 调用方应重建帧缓冲
 var ErrSizeChanged = errors.New("capture source size changed")
 
 type DxgiDesktopDuplicator struct {

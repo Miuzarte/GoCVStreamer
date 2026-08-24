@@ -70,7 +70,7 @@ func New(cfg Config, sources []detector.Source, bounds image.Rectangle, mover mo
 	}
 }
 
-// SetForegroundAllowed 设置前台门控：返回 false 时 assist 完全停用（如非目标游戏前台）。
+// SetForegroundAllowed 设置前台门控: 返回 false 时 assist 完全停用 (如非目标游戏前台)
 func (e *Engine) SetForegroundAllowed(fn func() bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -160,7 +160,7 @@ func (e *Engine) Tick() {
 	foregroundAllowed := e.foregroundAllowed
 	e.mu.RUnlock()
 
-	// 前台门控：非目标游戏在前台时完全停用。
+	// 前台门控: 非目标游戏在前台时完全停用
 	if foregroundAllowed != nil && !foregroundAllowed() {
 		e.mu.Lock()
 		e.isActive = false
@@ -202,8 +202,8 @@ func (e *Engine) Tick() {
 		return
 	}
 
-	// 多来源策略：取全链路延迟最低且新鲜的来源。
-	// 本地延迟=推理耗时；远程延迟=帧发出到收到结果（网络+手机推理）。
+	// 多来源策略: 取全链路延迟最低且新鲜的来源
+	// 本地延迟=推理耗时; 远程延迟=帧发出到收到结果 (网络+手机推理)
 	var results []detector.Result
 	var bestLatency time.Duration
 	bestSet := false

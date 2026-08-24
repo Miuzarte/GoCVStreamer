@@ -12,15 +12,15 @@ import (
 
 func TestSupported(t *testing.T) {
 	if !Supported() {
-		// 无法区分"系统不支持"与"DLL 缺失"，两种情况下都跳过断言，仅保证不 panic。
+		// 无法区分 "系统不支持" 与 "DLL 缺失", 两种情况下都跳过断言, 仅保证不 panic
 		t.Log("WGC not supported or wgc_helper.dll missing")
 		return
 	}
 	t.Log("WGC supported")
 }
 
-// TestManualCaptureFrames 手动验证：设置 WGC_TEST_CAPTURE=1 后运行，
-// 从显示器 0 抓取若干帧并校验尺寸与数据。
+// TestManualCaptureFrames 手动验证: 设置 WGC_TEST_CAPTURE=1 后运行,
+// 从显示器 0 抓取若干帧并校验尺寸与数据
 func TestManualCaptureFrames(t *testing.T) {
 	if os.Getenv("WGC_TEST_CAPTURE") == "" {
 		t.Skip("set WGC_TEST_CAPTURE=1 to run manual capture test")

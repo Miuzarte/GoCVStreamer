@@ -7,10 +7,10 @@ import (
 )
 
 var (
-	dllHandle       uintptr
-	argbScale       func(src *byte, srcStride int32, srcW int32, srcH int32, dst *byte, dstStride int32, dstW int32, dstH int32, filter int32) int32
-	abgrToARGB      func(src *byte, srcStride int32, dst *byte, dstStride int32, width int32, height int32) int32
-	argbToABGR      func(src *byte, srcStride int32, dst *byte, dstStride int32, width int32, height int32) int32
+	dllHandle  uintptr
+	argbScale  func(src *byte, srcStride int32, srcW int32, srcH int32, dst *byte, dstStride int32, dstW int32, dstH int32, filter int32) int32
+	abgrToARGB func(src *byte, srcStride int32, dst *byte, dstStride int32, width int32, height int32) int32
+	argbToABGR func(src *byte, srcStride int32, dst *byte, dstStride int32, width int32, height int32) int32
 )
 
 func init() {

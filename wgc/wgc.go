@@ -51,7 +51,7 @@ func ensureLoaded() error {
 		}
 		if wd, err := os.Getwd(); err == nil {
 			candidates = append(candidates, filepath.Join(wd, "wgc_helper.dll"))
-			// go test 的工作目录是包目录，DLL 通常在项目根。
+			// go test 的工作目录是包目录, DLL 通常在项目根
 			candidates = append(candidates, filepath.Join(wd, "..", "wgc_helper.dll"))
 		}
 
@@ -105,7 +105,7 @@ func ensureLoaded() error {
 	return loadErr
 }
 
-// PerfStats 为 wgc_helper 的 WgcPerfStats 结构（字段布局必须与 C 侧一致）。
+// PerfStats 为 wgc_helper 的 WgcPerfStats 结构 (字段布局必须与 C 侧一致)
 type PerfStats struct {
 	SystemQPC      int64
 	ArrivedQPC     int64
@@ -122,7 +122,7 @@ type PerfStats struct {
 	CopyOutUs      int64
 }
 
-// LastPerf 返回最近一帧的 WGC 阶段耗时与统计；handle 无效时返回 false。
+// LastPerf 返回最近一帧的 WGC 阶段耗时与统计; handle 无效时返回 false
 func (s *WgcSource) LastPerf() (PerfStats, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -137,7 +137,7 @@ func (s *WgcSource) LastPerf() (PerfStats, bool) {
 	return p, true
 }
 
-// Supported 报告当前系统是否支持 WGC 且 wgc_helper.dll 可加载。
+// Supported 报告当前系统是否支持 WGC 且 wgc_helper.dll 可加载
 func Supported() bool {
 	if err := ensureLoaded(); err != nil {
 		return false
@@ -146,7 +146,7 @@ func Supported() bool {
 	return ret != 0
 }
 
-// SetBorderless 控制是否隐藏 WGC 系统绘制的黄色捕获边框（Win10 2004+ 支持）。
+// SetBorderless 控制是否隐藏 WGC 系统绘制的黄色捕获边框 (Win10 2004+ 支持)
 func SetBorderless(enabled bool) {
 	if err := ensureLoaded(); err != nil {
 		return
@@ -158,7 +158,7 @@ func SetBorderless(enabled bool) {
 	procSetBorderless.Call(v)
 }
 
-// WgcSource 实现 capturer.Source，通过 wgc_helper.dll 采集显示器或窗口。
+// WgcSource 实现 capturer.Source, 通过 wgc_helper.dll 采集显示器或窗口
 type WgcSource struct {
 	mu sync.Mutex
 
@@ -168,13 +168,13 @@ type WgcSource struct {
 	displayIndex int
 	hwnd         windows.HWND
 	clientArea   bool
-	lookup       func() (windows.HWND, error) // 窗口模式：窗口丢失后重找
+	lookup       func() (windows.HWND, error) // 窗口模式: 窗口丢失后重找
 
 	frames     int
 	lastReopen time.Time
 }
 
-// NewDisplaySource 创建按显示器索引采集的 WGC 源（索引顺序与 DXGI/screenshot 一致）。
+// NewDisplaySource 创建按显示器索引采集的 WGC 源 (索引顺序与 DXGI/screenshot 一致)
 func NewDisplaySource(displayIndex int) (*WgcSource, error) {
 	if !Supported() {
 		return nil, errors.New("WGC unsupported (requires Windows 10 1903+, wgc_helper.dll next to the exe)")
@@ -190,8 +190,8 @@ func NewDisplaySource(displayIndex int) (*WgcSource, error) {
 	}, nil
 }
 
-// NewWindowSource 创建按窗口句柄采集的 WGC 源。
-// lookup 在窗口句柄失效后用于重新查找窗口，可为 nil（不自动重找）。
+// NewWindowSource 创建按窗口句柄采集的 WGC 源
+// lookup 在窗口句柄失效后用于重新查找窗口, 可为 nil (不自动重找)
 func NewWindowSource(hwnd windows.HWND, clientArea bool, lookup func() (windows.HWND, error)) (*WgcSource, error) {
 	if !Supported() {
 		return nil, errors.New("WGC unsupported (requires Windows 10 1903+, wgc_helper.dll next to the exe)")
@@ -252,7 +252,7 @@ func sizeOf(h unsafe.Pointer) (uint32, uint32) {
 	return uint32(w), uint32(hh)
 }
 
-// Bounds 返回当前采集画面尺寸（首帧到达后为实际尺寸）。
+// Bounds 返回当前采集画面尺寸 (首帧到达后为实际尺寸)
 func (s *WgcSource) Bounds() image.Rectangle {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -302,7 +302,7 @@ func (s *WgcSource) GetImageTimeout(img *image.RGBA, timeoutMs uint) error {
 	}
 }
 
-// reopenLocked 在源失效后重建：窗口模式重找窗口，显示器模式按原索引重开。
+// reopenLocked 在源失效后重建: 窗口模式重找窗口, 显示器模式按原索引重开
 func (s *WgcSource) reopenLocked() error {
 	if time.Since(s.lastReopen) < time.Second {
 		return errors.New("wgc capture closed, reopen throttled")
