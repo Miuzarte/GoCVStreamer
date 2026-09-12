@@ -65,6 +65,7 @@ logi-hidpp (HID++ 协议) ← mhub-logi (设备扩展) ← mhub-go (脚本运行
 .\build.ps1 debug            # -tags "debug,customenv" -gcflags "all=-N -l" (DEBUGGING=true, WGC 边框可见)
 .\build.ps1 run              # go run
 .\build.ps1 bench            # capturebench.exe
+.\build.ps1 test             # go test -tags "customenv" ./... (也可 .\build.ps1 test ./assist/...)
 .\build.ps1 wgcdll           # 用 MSVC 编译 wgc_helper.dll (需要 VS2022+, 平时不自动重建)
 ```
 
@@ -91,6 +92,8 @@ logi-hidpp (HID++ 协议) ← mhub-logi (设备扩展) ← mhub-go (脚本运行
 -mhub-addr 127.0.0.1:9000  远程注入到 mhub (空=本地注入)
 -mhub-script RainbowSix   武器状态注入的目标 mhub 脚本名 (空=mhub primary 脚本)
 -target-timeout 30m      目标游戏进程 (-game) 连续未检测到该时长则退出自身; 0=禁用
+-gpu-priority <类>       本进程 GPU 调度优先级 idle|below|normal|above|high|realtime (默认 high, normal=不改动)
+-assist-max-age <时长>   瞄准辅助一个结果最多驱动多久的注入 (0=自动=1/检测目标FPS, 30FPS 下 33ms)
 -trt-plugin <path>       TensorRT RTX EP 插件 DLL (默认 $TENSOR_RT_EP_ABI_PATH, 再退回内置 0.4.1 路径)
 -trt-async-alloc         回到 EP 默认的 cudaMallocAsync 异步显存池 (A/B 对照用)
 -trt-opts "k=v,k=v"      追加/覆盖 TRT RTX EP provider options
@@ -292,6 +295,39 @@ go run ./cmd/yolobench -device-io                  # 零拷贝设备张量
 - 未解: 根因未 100% 证明 (异步池 + 4~5GB 静态显存压力跑 6000 帧未复现)。但崩溃日志里 free 失败的正是那块 51MB execution context, 现在它被 `nv_persistent_context_memory` 从每次推理改成了常驻
 - 复发时: `set ORT_LOG_LEVEL=1` 抓现场, 重点看最后一笔 `DoAlloc/DoFree`、是否出现 pool 回退告警, 以及系统日志里是否有同秒的 `nvlddmkm` 153
 
+## 帧龄与瞄准辅助门控
+
+`assist` 以固定 125Hz 的 tick 读最新检测结果注入位移 (tick 频率是为了位移平滑, 不是时效), 同一批结果因此会被重复注入多次。检测被游戏抢占变慢时问题就出在这里:
+
+- 30FPS 检测: 每个结果被注入 ~4 次 (4 x `Speed`), 这是调好的手感
+- 15FPS 检测: 每个结果被注入 ~8 次, 冲量翻倍, 而且方向来自 66ms 前的位置 → 表现就是"鼠标被拽向过旧的位置"
+
+所以 `assist.Config.MaxAge` 限制**一个结果最多驱动多长时间的注入**: 结果寿命 (`now - Result.PublishedAt`) 超过上限就本 tick 不注入 (只保留绘制, 框变灰), 并累加 `assist_gated`。默认值 = `1 / 检测目标 FPS` (30FPS → 33ms, `-assist-max-age` 可改, `0` = 不限制)。
+
+- 门控依据是"结果发布到现在", 等价说法是"信息年龄 > 33ms + 该结果的采集→发布耗时"时不再注入。信息年龄 (`now - At`) 在健康 30FPS 下本身就会涨到约 45ms (发布后一直等到下一个结果), 直接拿它对 33ms 做门控会在正常帧率下就砍掉约一半 tick, 破坏平滑
+- 选源 (本地 vs 远端) 改用**信息年龄最小**的源, 不再按推理耗时: 远端推理可能很快, 但链路本身很旧
+- 帧龄口径 (都在 `/metrics`): `detection_pipeline_ms` = 采集→发布 (排队取帧 + 预处理 + 推理), `detection_age_ms` = 采集→现在, `detection_interval_ms` = 结果间隔 EMA, `stream_age_ms` = 远程结果帧龄
+
+### 检测循环是"新帧驱动 + 速率限制"
+
+原来 `detector.Run` 用固定相位 ticker 取帧: 帧采集完成后平均要白等半个检测周期 (~16ms) 才被取走, 这段等待直接记在帧龄上。现在改成 `capturer.FrameCh()` 唤醒 + 按目标帧率限速:
+
+- 速率限制按**帧的采集时刻**结算, 不用被唤醒的时刻: 唤醒延迟抖动只有几 ms, 用唤醒时刻结算会被算成"下一帧提前到达"从而整帧丢弃 (实测检测率从 30fps 掉到 ~22fps)
+- 目标间隔留 1/8 容差, 采集慢于目标时每一帧都会被处理; 只有帧源快于目标时才会真限速
+- `FpsIdle` / `idleCheck` 语义保持不变: 空闲且 `FpsIdle == 0` (当前默认) 完全不检测并清空结果, 这种情况用固定周期等待重新评估, 不依赖采集帧
+- 实测 (2560x1440 采集 + 1280 中心裁剪 + `-noopencv`, 单实例, 无游戏): `detection_pipeline_ms` 由 15~38ms 降到 9~16ms (均值约 12ms), 检测率仍是 29.8~30fps, `detection_age_ms` 14~46ms (锯齿: 最小 = pipeline, 最大 = pipeline + 检测周期)
+
+排查"检测被 GPU 抢占"按这个次序看: `capture_fps` 是否掉 (采集侧) → `detection_pipeline_ms` 与 `detection_cost_ms` 的差值 (排队等待 vs kernel) → `detection_age_ms` 是否超过门控上限。
+
+## 进程 / GPU 调度优先级
+
+- **CPU**: `main.init` 里 `windows.SetPriorityClass(HIGH_PRIORITY_CLASS)` (自首个提交起就有, 失败只告警)。CPU 被吃满时不至于让 125Hz 的 assist tick 与采集循环卡住
+- **GPU**: `-gpu-priority` (默认 `high`) 走 `gdi32!D3DKMTSetProcessSchedulingPriorityClass`, 是 **WDDM 进程级 GPU 调度类**; 启动时打印设置前后的读回值 (`winprio.go`)。已验证: Windows 11 26100 上 `gdi32` 导出这两个函数, **非提权进程**也能设置自己的类 (set 4/5 后 get 回读一致); 需要 HAGS (`HwSchMode=2`), HAGS 关闭时只提示"可能无效"
+- `normal` = 完全不碰; 游戏帧生成若退化, 按 `high` → `above` → `normal` 退回
+- **跨进程只有这一档有效**: CUDA 流优先级 (`has_user_compute_stream` / `user_compute_stream`) 只在同一 context 内排序, 对"别的进程吃满显卡"无效 (未采用)
+- **mhub 侧**: `mhub-go/cmd/mhub` 启动时同样把自己设为 `HIGH_PRIORITY_CLASS` (它是注入端点, CPU 吃满时 RemoteServer 读循环 / 宏与事件循环 / `SendInput` 会整体延迟)
+- 反作弊: 只设置本进程的优先级, **不打开游戏进程句柄, 不读也不改游戏的任何设置**
+
 ## 代码约定
 
 与兄弟仓库 (mhub-go/mhub-logi/logi-hidpp) 一致, 见各自 AGENTS.md:
@@ -322,3 +358,5 @@ go run ./cmd/yolobench -device-io                  # 零拷贝设备张量
 - 改 YOLO 绑定方式 (host / device 张量, IoBinding 复用) 后**必须跑 `yolobench -probe`**: host 张量不重新 `BindInput` 就不会刷新设备数据, 表现是"检测框永远停在第一帧"
 - 换 TRT RTX EP / TRT 版本后删掉 `trt_cache/`; `-yolo-device-io` 依赖 cudart (`cudart64_13/12.dll`), 缺失会在引擎初始化时报错而不是每帧失败
 - GPU 相关排查一律先 `set ORT_LOG_LEVEL=1` (详见"本地 YOLO 推理"一节)
+- 改 assist 门控 / 选源 / 检测循环后必须跑 `.\build.ps1 test ./assist/...` (门控与选源都有单测, 用注入时钟, 不依赖真实 ticker)
+- "检测变慢导致 assist 拽旧位置"看 `/metrics` 的 `detection_age_ms` / `detection_pipeline_ms` / `assist_gated`; 观察前先确认**只有一个 streamer 实例在跑**, 多个实例会抢 `:8080`, 读到的指标可能来自旧进程

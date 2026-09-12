@@ -34,6 +34,8 @@ type Frame struct {
 	rgba *image.RGBA
 	mat  gocv.Mat
 	id   uint64
+	// at 为该帧的采集完成时刻, 供消费方计算帧龄 (capture -> now)
+	at time.Time
 }
 
 type Server struct {
@@ -48,6 +50,9 @@ type Server struct {
 	onFrame func()
 	cvtCode gocv.ColorConversionCode
 	cfg     Config
+
+	// frameCh 用于通知帧驱动型消费方 (如检测循环) 有新帧, 容量 1 丢旧留新
+	frameCh chan struct{}
 
 	targetFps    int
 	targetExpiry time.Time
@@ -78,6 +83,7 @@ func NewServer(src Source, cfg Config, mode gocv.IMReadFlag, onFrame func()) *Se
 		cvtCode:    cvtCode,
 		cfg:        cfg,
 		targetFps:  cfg.MinFps,
+		frameCh:    make(chan struct{}, 1),
 		noOpenCV:   cfg.DisableOpenCV,
 
 		diagGetImage:   timing.NewDiag("GetImage"),
@@ -110,6 +116,20 @@ func (s *Server) ReadRgba() *image.RGBA {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.frame.rgba
+}
+
+// ReadFrame 一次返回最新帧的 RGBA 数据 / 帧号 / 采集时刻
+//
+// 三者必须同临界区取, 否则消费方可能把新旧帧配到一起
+func (s *Server) ReadFrame() (*image.RGBA, uint64, time.Time) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.frame.rgba, s.frame.id, s.frame.at
+}
+
+// FrameCh 返回新帧通知通道 (容量 1, 丢旧留新), 供帧驱动型消费方 select
+func (s *Server) FrameCh() <-chan struct{} {
+	return s.frameCh
 }
 
 // CloneRgba 返回最新 RGBA 帧的深拷贝 (供其他 goroutine 编码/发送用)
@@ -219,6 +239,7 @@ func (s *Server) Run(ctx context.Context) {
 		s.mu.Lock()
 		s.frame.rgba = rawRGBA
 		s.frame.id++
+		s.frame.at = time.Now()
 
 		if !s.noOpenCV {
 			tImg := time.Now()
@@ -248,6 +269,12 @@ func (s *Server) Run(ctx context.Context) {
 
 		if s.onFrame != nil {
 			s.onFrame()
+		}
+
+		// 通知帧驱动型消费方 (容量 1, 非阻塞: 旧通知没被取走就丢弃, 消费方总是读最新帧)
+		select {
+		case s.frameCh <- struct{}{}:
+		default:
 		}
 
 		if elapsed := time.Since(tStart); elapsed < interval {

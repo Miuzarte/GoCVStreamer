@@ -107,6 +107,14 @@ type Stats struct {
 	Fps   float64
 	Cost  time.Duration
 	Count int
+
+	// At 为该批结果对应帧的采集时刻, PublishedAt 为结果发布时刻
+	At          time.Time
+	PublishedAt time.Time
+	// Pipeline = PublishedAt - At: 等待取帧 + 预处理 + 推理的总耗时
+	Pipeline time.Duration
+	// Interval 为相邻两次结果发布间隔的 EMA (指数平滑), 反映实际检测周期
+	Interval time.Duration
 }
 
 type Engine struct {
@@ -128,6 +136,9 @@ type Engine struct {
 	// broken 表示 CUDA context 已被粘性错误破坏, 不能再碰任何 GPU / ORT 资源
 	broken  atomic.Bool
 	onFatal func(error)
+
+	// lastPublish 为上一次结果发布时刻, 用于计算 Stats.Interval
+	lastPublish time.Time
 }
 
 func New(capturerServer *capturer.Server, cfg Config) (*Engine, error) {
@@ -192,16 +203,38 @@ func (e *Engine) Close() error {
 	return nil
 }
 
-func (e *Engine) Detect(img image.Image) error {
+// Detect 对一帧图像推理, frameAt 为该帧的采集时刻 (用于帧龄统计)
+func (e *Engine) Detect(img image.Image, frameAt time.Time) error {
 	tStart := time.Now()
 
 	results, err := e.detEngine.Predict(img)
-	e.stats.Cost = time.Since(tStart)
+	cost := time.Since(tStart)
 	if err != nil {
+		e.mu.Lock()
+		e.stats.Cost = cost
+		e.mu.Unlock()
 		return err
 	}
 
+	now := time.Now()
+
 	e.mu.Lock()
+	e.stats.Cost = cost
+	e.stats.At = frameAt
+	e.stats.PublishedAt = now
+	if !frameAt.IsZero() {
+		e.stats.Pipeline = now.Sub(frameAt)
+	}
+	if !e.lastPublish.IsZero() {
+		dt := now.Sub(e.lastPublish)
+		if e.stats.Interval == 0 {
+			e.stats.Interval = dt
+		} else {
+			e.stats.Interval = time.Duration(float64(e.stats.Interval)*0.8 + float64(dt)*0.2)
+		}
+	}
+	e.lastPublish = now
+
 	e.personBuf = e.personBuf[:0]
 	for _, r := range results {
 		if e.cfg.ResultIds.Has1(r.ClassID) {
@@ -223,7 +256,13 @@ func (e *Engine) Snapshot() (results []Result, latency time.Duration, fresh bool
 	}
 	results = make([]Result, len(e.personResults))
 	for i, d := range e.personResults {
-		results[i] = Result{DetResult: d, Kind: KindLocal, Latency: e.stats.Cost}
+		results[i] = Result{
+			DetResult:   d,
+			Kind:        KindLocal,
+			Latency:     e.stats.Cost,
+			At:          e.stats.At,
+			PublishedAt: e.stats.PublishedAt,
+		}
 	}
 	return results, e.stats.Cost, true
 }
@@ -293,70 +332,64 @@ func (e *Engine) Run(ctx context.Context) {
 		intervalIdle = time.Second / time.Duration(e.cfg.FpsIdle)
 	}
 
-	tickerNormal := time.NewTicker(interval)
-	defer tickerNormal.Stop()
-	tickerIdle := time.NewTicker(intervalIdle)
-	defer tickerIdle.Stop()
-	mixinTicker := make(chan time.Time, 2)
-	defer close(mixinTicker)
+	frameCh := e.capturerServer.FrameCh()
+	// 先拉高一次采集上限, 否则首帧要等采集侧的兜底周期
+	e.capturerServer.RaiseCeiling(e.cfg.Fps)
+
+	// lastFrameAt 为上一次进入检测的帧的采集时刻, 用于把检测速率限制在目标帧率
+	var lastFrameAt time.Time
 
 	for {
+		// 空闲且未配置空闲帧率: 完全不检测, 清空结果 (与原 ticker 实现一致)
+		// 这里用固定周期等待而不是等新帧, 否则采集侧回落到 MinFps 后会拖慢恢复速度
+		if e.idleCheck != nil && e.idleCheck() && e.cfg.FpsIdle == 0 {
+			e.mu.Lock()
+			e.stats = Stats{}
+			e.personResults = nil
+			e.mu.Unlock()
+
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(interval):
+			}
+			continue
+		}
+
+		// 新帧驱动: 帧一就绪就取最新的一帧, 不再等固定相位的 tick
+		// 固定相位 ticker 平均白等半个检测周期 (30FPS 下 ~16ms), 这段等待直接记在帧龄上
 		select {
 		case <-ctx.Done():
 			return
-
-		case t, ok := <-tickerNormal.C:
-			if !ok {
-				return
-			}
-			if e.idleCheck != nil && e.idleCheck() {
-				e.mu.Lock()
-				e.stats = Stats{}
-				e.personResults = nil
-				e.mu.Unlock()
-				continue
-			}
-			select {
-			case mixinTicker <- t:
-			default:
-			}
-			continue
-
-		case t, ok := <-tickerIdle.C:
-			if !ok {
-				return
-			}
-			if e.idleCheck == nil || !e.idleCheck() {
-				continue
-			}
-			select {
-			case mixinTicker <- t:
-			default:
-			}
-			continue
-
-		case _, ok := <-mixinTicker:
-			if !ok {
-				return
-			}
+		case <-frameCh:
 		}
 
+		idle := e.idleCheck != nil && e.idleCheck()
+
 		fps := e.cfg.Fps
-		if e.idleCheck != nil && e.idleCheck() {
+		if idle {
 			fps = e.cfg.FpsIdle
 		}
 		e.capturerServer.RaiseCeiling(fps)
 
-		id := e.capturerServer.ReadFrameId()
-		if id == lastFrameId {
+		captureRgba, id, frameAt := e.capturerServer.ReadFrame()
+		if captureRgba == nil || id == lastFrameId {
 			continue
 		}
 		lastFrameId = id
 
-		captureRgba := e.capturerServer.ReadRgba()
-		if captureRgba == nil {
+		// 速率限制按"帧的采集时刻"结算, 而不是我们被唤醒的时刻:
+		// 唤醒延迟抖动只有几 ms, 但用唤醒时刻结算会被算成"下一帧提前到达"从而整帧丢弃
+		// (实测检测率会从 30fps 掉到 ~22fps); 按帧时刻结算与调度抖动无关
+		// 目标间隔留 1/8 容差, 采集慢于目标时每一帧都会被处理
+		limit := interval - interval/8
+		if idle {
+			limit = intervalIdle - intervalIdle/8
+		}
+		if !lastFrameAt.IsZero() && frameAt.Sub(lastFrameAt) < limit {
 			continue
 		}
+		lastFrameAt = frameAt
 
 		var detectImg image.Image
 		if cropNeeded {
@@ -371,7 +404,7 @@ func (e *Engine) Run(ctx context.Context) {
 		libyuv.ResizeRGBAInto(resizeDst, detectImg.(*image.RGBA), e.cfg.InputSize, e.cfg.InputSize)
 		detectImg = resizeDst
 
-		err := e.Detect(detectImg)
+		err := e.Detect(detectImg, frameAt)
 		if err != nil {
 			if ort.IsFatalError(err) {
 				// CUDA 粘性错误: context 已报废, 再推理只会刷屏, 再销毁 session 会直接崩溃

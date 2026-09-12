@@ -21,10 +21,14 @@ const (
 
 // Result 带来源与延迟的检测结果
 // Latency: 本地=推理耗时; 远程=帧发出到收到结果的全链路延迟 (含网络+手机推理)
+// At: 该批结果对应帧的采集时刻 (远程源为收到时刻减去延迟, 是乐观估计)
+// PublishedAt: 结果发布 / 收到时刻; 帧龄 = now - At, 流水线耗时 = PublishedAt - At
 type Result struct {
 	yolo26.DetResult
-	Kind    Kind
-	Latency time.Duration
+	Kind        Kind
+	Latency     time.Duration
+	At          time.Time
+	PublishedAt time.Time
 }
 
 // Source 推理源接口 (类比 capturer.Source: 可以是本地 YOLO, 远程 NPU 等)
@@ -53,14 +57,33 @@ func NewRemoteSource(ttl time.Duration) *RemoteSource {
 
 // SetResults 由远程回调写入 (屏幕坐标系); latency 为该帧全链路延迟
 func (s *RemoteSource) SetResults(dets []yolo26.DetResult, latency time.Duration) {
+	now := time.Now()
+	at := now.Add(-latency)
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.results = s.results[:0]
 	for _, d := range dets {
-		s.results = append(s.results, Result{DetResult: d, Kind: KindRemote, Latency: latency})
+		s.results = append(s.results, Result{
+			DetResult:   d,
+			Kind:        KindRemote,
+			Latency:     latency,
+			At:          at,
+			PublishedAt: now,
+		})
 	}
 	s.latency = latency
-	s.recv = time.Now()
+	s.recv = now
+}
+
+// Age 返回最近一次远程结果的帧龄 (收到时刻减去全链路延迟), 尚未收到结果时返回 false
+func (s *RemoteSource) Age() (time.Duration, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.recv.IsZero() {
+		return 0, false
+	}
+	return time.Since(s.recv.Add(-s.latency)), true
 }
 
 func (s *RemoteSource) Snapshot() ([]Result, time.Duration, bool) {

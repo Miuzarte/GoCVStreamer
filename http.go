@@ -28,6 +28,13 @@ type MetricsSnapshot struct {
 	DetectionFps    float64 `json:"detection_fps"`
 	DetectionCostMs float64 `json:"detection_cost_ms"`
 	DetectionCount  int     `json:"detection_count"`
+	// DetectionAgeMs 为最新本地结果对应帧的帧龄 (采集 -> 现在), 即 assist 看到的"信息有多旧"
+	DetectionAgeMs      float64 `json:"detection_age_ms"`
+	DetectionPipelineMs float64 `json:"detection_pipeline_ms"`
+	DetectionIntervalMs float64 `json:"detection_interval_ms"`
+
+	AssistAgeMs float64 `json:"assist_age_ms"`
+	AssistGated uint64  `json:"assist_gated"`
 
 	StreamClients     int     `json:"stream_clients"`
 	StreamFps         float64 `json:"stream_fps"`
@@ -38,6 +45,7 @@ type MetricsSnapshot struct {
 	StreamInferenceMs float64 `json:"stream_inference_ms"`
 	StreamNetworkMs   float64 `json:"stream_network_ms"`
 	StreamFresh       bool    `json:"stream_fresh"`
+	StreamAgeMs       float64 `json:"stream_age_ms"`
 
 	Cpu       float64 `json:"cpu"`
 	Debugging bool    `json:"debugging"`
@@ -87,12 +95,23 @@ func snapshotMetrics() (m MetricsSnapshot) {
 		s := detectorEngine.Stats()
 		m.DetectionFps = s.Fps
 		m.DetectionCostMs = float64(s.Cost) / ms
+		if !s.At.IsZero() {
+			m.DetectionAgeMs = float64(time.Since(s.At)) / ms
+		}
+		m.DetectionPipelineMs = float64(s.Pipeline) / ms
+		m.DetectionIntervalMs = float64(s.Interval) / ms
 	}
 	for _, src := range inferenceSources {
 		results, _, fresh := src.Snapshot()
 		if fresh {
 			m.DetectionCount += len(results)
 		}
+	}
+
+	if assistEngine != nil {
+		age, gated := assistEngine.Status()
+		m.AssistAgeMs = float64(age) / ms
+		m.AssistGated = gated
 	}
 
 	if streamServer != nil {
@@ -111,6 +130,9 @@ func snapshotMetrics() (m MetricsSnapshot) {
 				if m.StreamNetworkMs < 0 {
 					m.StreamNetworkMs = 0
 				}
+			}
+			if age, ok := remoteSource.Age(); ok {
+				m.StreamAgeMs = float64(age) / ms
 			}
 		}
 	}

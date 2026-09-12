@@ -74,6 +74,10 @@ var (
 	mhubAddr   = flag.String("mhub-addr", "", "mhub remote injection address (e.g. 127.0.0.1:9000, empty = local injection)")
 	mhubScript = flag.String("mhub-script", "RainbowSix", "mhub script name targeted by weapon state injection (empty = mhub primary script)")
 
+	assistMaxAge = flag.Duration("assist-max-age", 0, "aim assist: ignore detection results older than this (0 = auto = 1/target detect FPS, 33ms at 30fps)")
+
+	gpuPriority = flag.String("gpu-priority", "high", "this process GPU scheduling priority class: idle|below|normal|above|high|realtime (normal = don't touch, needs HAGS)")
+
 	targetTimeout = flag.Duration("target-timeout", 30*time.Minute, "exit when the target game process (-game) is not detected for this long (0 disables)")
 
 	trtPlugin     = flag.String("trt-plugin", "", "TensorRT RTX EP plugin DLL path (default: $TENSOR_RT_EP_ABI_PATH or built-in 0.4.1 path)")
@@ -93,6 +97,9 @@ const (
 const (
 	CREATE_MASK                   = false
 	MATCHING_MODE gocv.IMReadFlag = gocv.IMReadGrayScale
+
+	// detectTargetFps 本地检测目标帧率, -assist-max-age 的自动值 = 1 / 该值
+	detectTargetFps = 30
 )
 
 var (
@@ -188,6 +195,9 @@ func init() {
 	if err != nil {
 		log.Warn().Err(err).Msg("failed to set process priority")
 	}
+
+	// GPU 调度优先级 (WDDM 进程级): 游戏吃满显卡时减少本进程推理的排队等待
+	initGPUPriority(*gpuPriority)
 
 	processSelf, err = process.NewProcess(int32(processId))
 	if err != nil {
@@ -522,10 +532,20 @@ func main() {
 				}
 				assistCfg.RequireMouseMove = false
 			}
+			assistCfg.MaxAge = *assistMaxAge
+			if assistCfg.MaxAge == 0 {
+				// 默认: 只接受"落后不超过一帧"的结果, 更旧的会被门控丢弃
+				assistCfg.MaxAge = time.Second / detectTargetFps
+			}
 			assistEngine = assist.New(assistCfg, inferenceSources, capturerServer.Bounds(), mover)
 			assistEngine.SetForegroundAllowed(func() bool {
 				return assistForegroundAllowed.Load()
 			})
+			log.Info().
+				Str("game", *game).
+				Float64("speed", assistCfg.Speed).
+				Dur("maxAge", assistCfg.MaxAge).
+				Msg("aim assist configured")
 		}
 	}
 
@@ -998,7 +1018,7 @@ func parseKeyValues(s string) map[string]string {
 
 func initDetector() *detector.Engine {
 	cfg := detector.DefaultConfig()
-	cfg.Fps = 30
+	cfg.Fps = detectTargetFps
 	cfg.CropSize = cfg.InputSize * 2
 
 	if *trtPlugin != "" {

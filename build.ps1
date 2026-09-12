@@ -1,8 +1,10 @@
 param(
     [string]$Command = "run",
     # customenv: 告诉 GoCV 使用自行编译的 OpenCV
-    [string]$Tags = "customenv"
+    [string]$Tags = "customenv",
     # [string]$Tags = "customenv,matprofile"
+    # test 命令的包路径 (默认全部; 例如 .\build.ps1 test ./assist/...)
+    [string]$Packages = "./..."
 )
 
 # 保存执行前的 PATH
@@ -184,6 +186,12 @@ switch ($Command.ToLower()) {
         break
     }
 
+    "test" {
+        Write-Host "go test -tags `"$Tags`" $Packages" -ForegroundColor Green
+        go test -tags "$Tags" $Packages
+        break
+    }
+
     "wgcdll" {
         Build-WgcDll
         break
@@ -191,7 +199,7 @@ switch ($Command.ToLower()) {
     
     default {
         Write-Host "unknown command: $Command" -ForegroundColor Red
-        Write-Host "available commands: run, debug, release, bench, wgcdll" -ForegroundColor Yellow
+        Write-Host "available commands: run, debug, release, bench, test, wgcdll" -ForegroundColor Yellow
         exit 1
     }
 }

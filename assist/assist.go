@@ -7,6 +7,7 @@ import (
 	"math"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gioui.org/layout"
@@ -28,6 +29,13 @@ type Config struct {
 	InnerRatio       float64
 	RequireKeys      []keystate.KeyCode
 	RequireMouseMove bool
+
+	// MaxAge 为结果寿命上限 (从结果发布 / 收到时刻算起), 超过则本 tick 不再注入 (0 = 不限制)
+	//
+	// 一个结果最多驱动 MaxAge 时长的注入; 检测被游戏抢占而变慢时 (30FPS -> 15FPS),
+	// 旧结果不会继续被反复注入, 也就不会把鼠标一直拉向过旧的位置
+	// 一般取 1 / 目标检测 FPS: 30FPS 下结果每 33ms 更新一次, 正常情况几乎不会被门控
+	MaxAge time.Duration
 }
 
 func DefaultConfig() Config {
@@ -55,6 +63,13 @@ type Engine struct {
 
 	targetBox image.Rectangle
 	isActive  bool
+
+	// now 注入时钟, 便于单测; 默认 time.Now
+	now func() time.Time
+	// lastAge 为最近一次采纳结果的帧龄
+	lastAge time.Duration
+	// gatedCount 为因帧龄超限而放弃注入的 tick 数
+	gatedCount atomic.Uint64
 }
 
 func New(cfg Config, sources []detector.Source, bounds image.Rectangle, mover mouse.Mover) *Engine {
@@ -67,6 +82,7 @@ func New(cfg Config, sources []detector.Source, bounds image.Rectangle, mover mo
 		sources: sources,
 		keys:    keystate.NewTracker(),
 		mover:   mover,
+		now:     time.Now,
 	}
 }
 
@@ -94,7 +110,11 @@ func (e *Engine) DisplayState(sb *strings.Builder) {
 	if e.cfg.Vertical {
 		mode += "V"
 	}
-	fmt.Fprintf(sb, "| Aim:%s V:%.1f |", mode, e.cfg.Speed)
+	fmt.Fprintf(sb, "| Aim:%s V:%.1f Age:%.0fms", mode, e.cfg.Speed, float64(e.lastAge)/float64(time.Millisecond))
+	if e.cfg.MaxAge > 0 && e.lastAge > e.cfg.MaxAge {
+		fmt.Fprintf(sb, " STALE(gated:%d)", e.gatedCount.Load())
+	}
+	sb.WriteString(" |")
 }
 
 var lastDoubleAlt = time.Now()
@@ -202,9 +222,10 @@ func (e *Engine) Tick() {
 		return
 	}
 
-	// 多来源策略: 取全链路延迟最低且新鲜的来源
-	// 本地延迟=推理耗时; 远程延迟=帧发出到收到结果 (网络+手机推理)
+	// 多来源策略: 取信息年龄最小且新鲜的来源
+	// 不用推理耗时比较, 远端推理可能很快但链路本身很旧
 	var results []detector.Result
+	var bestInfoAge time.Duration
 	var bestLatency time.Duration
 	bestSet := false
 	for _, src := range e.sources {
@@ -212,8 +233,10 @@ func (e *Engine) Tick() {
 		if !fresh || len(srcResults) == 0 {
 			continue
 		}
-		if !bestSet || latency < bestLatency {
+		age := e.infoAge(srcResults[0], latency)
+		if !bestSet || age < bestInfoAge {
 			results = srcResults
+			bestInfoAge = age
 			bestLatency = latency
 			bestSet = true
 		}
@@ -256,6 +279,9 @@ func (e *Engine) Tick() {
 	bw := target.Box.Dx()
 	bh := target.Box.Dy()
 
+	// 结果寿命 (从发布算起), 门控依据
+	age := e.resultAge(target, bestLatency)
+
 	innerMargin := (1.0 - cfg.InnerRatio) / 2
 
 	stopL := float64(target.Box.Min.X) + float64(bw)*innerMargin
@@ -286,8 +312,20 @@ func (e *Engine) Tick() {
 	if isOutside && nearestDist >= float64(bw)/2 {
 		e.mu.Lock()
 		e.targetBox = target.Box
+		e.lastAge = age
 		e.isActive = false
 		e.mu.Unlock()
+		return
+	}
+
+	// 结果寿命超限: 继续注入就是把鼠标拉向过旧的位置, 只保留绘制
+	if cfg.MaxAge > 0 && age > cfg.MaxAge {
+		e.mu.Lock()
+		e.targetBox = target.Box
+		e.lastAge = age
+		e.isActive = false
+		e.mu.Unlock()
+		e.gatedCount.Add(1)
 		return
 	}
 
@@ -311,12 +349,40 @@ func (e *Engine) Tick() {
 
 	e.mu.Lock()
 	e.targetBox = target.Box
+	e.lastAge = age
 	e.isActive = dx != 0 || dy != 0
 	e.mu.Unlock()
 
 	if dx != 0 || dy != 0 {
 		e.mover.MoveAndMark(dx, dy)
 	}
+}
+
+// infoAge 是信息年龄: 帧采集到现在, 用于在多个源里挑信息最新的一批结果
+func (e *Engine) infoAge(r detector.Result, fallback time.Duration) time.Duration {
+	if r.At.IsZero() {
+		return fallback
+	}
+	return e.now().Sub(r.At)
+}
+
+// resultAge 是结果寿命: 结果发布 / 收到到现在, 门控依据
+//
+// 一个结果最多驱动 MaxAge 时长的注入; 检测被游戏抢占变慢时 (30FPS -> 15FPS),
+// 旧结果不会继续被反复注入, 也就不会把鼠标一直拉向过旧的位置
+func (e *Engine) resultAge(r detector.Result, fallback time.Duration) time.Duration {
+	if r.PublishedAt.IsZero() {
+		return fallback
+	}
+	return e.now().Sub(r.PublishedAt)
+}
+
+// Status 返回最近一次采纳结果的结果寿命与因超限被放弃的 tick 数 (供 metrics 使用)
+func (e *Engine) Status() (age time.Duration, gated uint64) {
+	e.mu.RLock()
+	age = e.lastAge
+	e.mu.RUnlock()
+	return age, e.gatedCount.Load()
 }
 
 func (e *Engine) Run(ctx context.Context) {
@@ -338,6 +404,7 @@ func (e *Engine) Draw(gtx layout.Context, s ui.DScale) {
 	e.mu.RLock()
 	box := e.targetBox
 	active := e.isActive
+	age := e.lastAge
 	cfg := e.cfg
 	e.mu.RUnlock()
 
@@ -345,9 +412,13 @@ func (e *Engine) Draw(gtx layout.Context, s ui.DScale) {
 		return
 	}
 
-	color := ui.ColorRed.NRGBA()
-	if !active {
-		color = ui.ColorYellow.NRGBA()
+	// 颜色: 灰 = 帧龄超限已被丢弃, 红 = 正在注入, 黄 = 跟随但未注入
+	color := ui.ColorYellow.NRGBA()
+	if active {
+		color = ui.ColorRed.NRGBA()
+	}
+	if cfg.MaxAge > 0 && age > cfg.MaxAge {
+		color = ui.ColorGray.NRGBA()
 	}
 
 	cx := int(float64(e.bounds.Dx()) / 2)
