@@ -229,7 +229,37 @@ func TestClientEval(t *testing.T) {
 	if err := jsonv2.Unmarshal([]byte(recvMsg(t, got)), &msg); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if msg.T != "eval" || msg.Expr != "SpeedOffset = 3" {
+	if msg.T != "eval" || msg.Expr != "SpeedOffset = 3" || msg.Target != "" {
 		t.Fatalf("eval msg = %+v", msg)
+	}
+}
+
+// TestClientStateTarget 验证定向脚本名随 state/eval 一起发送 (mhub 据此把状态
+// 投给指定脚本; 目标未激活时由 mhub 缓存后补发)
+func TestClientStateTarget(t *testing.T) {
+	addr, got := startFakeMhub(t)
+	c := Dial(addr, "RainbowSix")
+	defer c.Close()
+
+	if err := c.SetRemoteState("WeaponType", "full"); err != nil {
+		t.Fatalf("SetRemoteState: %v", err)
+	}
+	var msg remoteMsg
+	if err := jsonv2.Unmarshal([]byte(recvMsg(t, got)), &msg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if msg.T != "state" || msg.Key != "WeaponType" || msg.Target != "RainbowSix" {
+		t.Fatalf("state msg = %+v", msg)
+	}
+
+	if err := c.Eval("SpeedOffset = 3"); err != nil {
+		t.Fatalf("Eval: %v", err)
+	}
+	var msg2 remoteMsg
+	if err := jsonv2.Unmarshal([]byte(recvMsg(t, got)), &msg2); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if msg2.T != "eval" || msg2.Target != "RainbowSix" {
+		t.Fatalf("eval msg = %+v", msg2)
 	}
 }

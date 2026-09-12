@@ -149,9 +149,15 @@ func (e *Engine) AddWeapon(path string, createMask bool, flag gocv.IMReadFlag) e
 	return e.cfg.Weapons.Append(path, createMask, flag)
 }
 
+// WeaponIndex 返回当前识别到的武器下标, 未识别到武器时返回 WEAPON_INDEX_NONE
+// 未匹配帧的 result 是 MatchResult{} 零值 (WeaponIndex 为 Go 零值 0), 所以必须同时看 Found,
+// 否则"没识别到"会被读成第 0 把武器
 func (e *Engine) WeaponIndex() int {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
+	if !e.result.Found {
+		return WEAPON_INDEX_NONE
+	}
 	return e.result.WeaponIndex
 }
 

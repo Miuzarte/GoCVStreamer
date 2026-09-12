@@ -13,6 +13,9 @@
 			"path": "../logi-hidpp"
 		},
 		{
+			"path": "../mhub-gui"
+		},
+		{
 			"path": "../Inferencer"
 		},
 		{

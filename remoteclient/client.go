@@ -37,21 +37,29 @@ type remoteMsg struct {
 	Key    string          `json:"key,omitzero"`
 	Value  json.RawMessage `json:"value,omitzero"`
 	Expr   string          `json:"expr,omitzero"`
+	// Target 是 state/eval 的目标脚本名 (空 = mhub 的 primary 激活脚本);
+	// mhub 侧对未激活的目标会缓存状态, 待其激活后补发
+	Target string `json:"target,omitzero"`
 }
 
 // Client 是远程注入客户端, 实现 mouse.Mover,
-// 断线后在下次调用时自动重连 (1s 间隔, 最多 3 次尝试)
+// 断线后在下次调用时自动重连 (最多 3 次尝试, 间隔 100ms)
 type Client struct {
 	addr string
+	// target 是状态/表达式注入的目标脚本名 (空 = mhub primary)
+	target string
 
 	mu   sync.Mutex
 	conn net.Conn
 }
 
 // Dial 创建指向 mhub RemoteServer 的客户端, 并尝试建立初始连接
-// (失败不阻塞, send 时会自动重试)
-func Dial(addr string) *Client {
+// (失败不阻塞, send 时会自动重试); target 可选目标脚本名 (空 = primary)
+func Dial(addr string, target ...string) *Client {
 	c := &Client{addr: addr}
+	if len(target) > 0 {
+		c.target = target[0]
+	}
 	c.mu.Lock()
 	c.dialLocked()
 	c.mu.Unlock()
@@ -91,6 +99,10 @@ func (c *Client) closeLocked() error {
 	return err
 }
 
+// retryDelay 是发送失败后重连前的等待时间: 状态注入现在由 streamer 周期重推兜底,
+// 因此这里保持短间隔, 避免长时间阻塞调用方 (武器识别循环/瞄准循环)
+const retryDelay = 100 * time.Millisecond
+
 // send 确保连接可用后写入一条消息
 func (c *Client) send(msg remoteMsg) error {
 	c.mu.Lock()
@@ -100,7 +112,7 @@ func (c *Client) send(msg remoteMsg) error {
 		if c.conn == nil {
 			c.dialLocked()
 			if c.conn == nil {
-				time.Sleep(time.Second)
+				time.Sleep(retryDelay)
 				continue
 			}
 		}
@@ -112,7 +124,7 @@ func (c *Client) send(msg remoteMsg) error {
 		_ = c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		if _, err := c.conn.Write(data); err != nil {
 			_ = c.closeLocked()
-			time.Sleep(time.Second)
+			time.Sleep(retryDelay)
 			continue
 		}
 		return nil
@@ -157,16 +169,17 @@ func (c *Client) MouseClick(button int) error {
 	return c.MouseUp(button)
 }
 
-// SetRemoteState 推送命名状态, mhub 会以 "key = value" 形式注入脚本全局变量
+// SetRemoteState 推送命名状态, mhub 会以 "key = value" 形式注入目标脚本全局变量
+// (目标为 Dial 时传入的脚本名, 空则 mhub primary); 目标未激活时 mhub 会缓存该值
 func (c *Client) SetRemoteState(key string, value any) error {
 	raw, err := jsonv2.Marshal(value)
 	if err != nil {
 		return fmt.Errorf("remoteclient: marshal state %q: %w", key, err)
 	}
-	return c.send(remoteMsg{T: "state", Key: key, Value: raw})
+	return c.send(remoteMsg{T: "state", Key: key, Value: raw, Target: c.target})
 }
 
-// Eval 注入任意表达式到 mhub 活动脚本解释器
+// Eval 注入任意表达式到 mhub 目标脚本解释器
 func (c *Client) Eval(expr string) error {
-	return c.send(remoteMsg{T: "eval", Expr: expr})
+	return c.send(remoteMsg{T: "eval", Expr: expr, Target: c.target})
 }

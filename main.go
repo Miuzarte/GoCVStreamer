@@ -71,7 +71,8 @@ var (
 	nosender      = flag.Bool("nosender", false, "disable WebSocket stream server")
 	streamTtl     = flag.Int("streamttl", 500, "remote results TTL in ms (0 disables remote results)")
 
-	mhubAddr = flag.String("mhub-addr", "", "mhub remote injection address (e.g. 127.0.0.1:9000, empty = local injection)")
+	mhubAddr   = flag.String("mhub-addr", "", "mhub remote injection address (e.g. 127.0.0.1:9000, empty = local injection)")
+	mhubScript = flag.String("mhub-script", "RainbowSix", "mhub script name targeted by weapon state injection (empty = mhub primary script)")
 
 	targetTimeout = flag.Duration("target-timeout", 30*time.Minute,
 		"exit when the target game process (-game) is not detected for this long (0 disables)")
@@ -129,11 +130,31 @@ type statePusher interface {
 	Eval(expr string) error
 }
 
+// toNoneDebounceInterval 是 "武器 -> 无武器" 的防抖时长:
+// 模板匹配的偶发丢帧不应立刻切到 none, 否则压枪会瞬断
+// the actual duration is exactly a second,
+// more for template matching loop delay
+const toNoneDebounceInterval = 1500 * time.Millisecond
+
 // mover 是鼠标注入器, 本地或远程
 var mover mouse.Mover = mouse.LocalMover{}
 
 // weaponAlt 是否使用武器备选速度档 (Alt+Insert 切换, 复刻原 recoil 行为)
 var weaponAlt atomic.Bool
+
+// weaponState 是 r6sLoop 已经"确认"的武器状态 (已过切换防抖)
+// 重推循环只认它, 不再去看 matcherEngine 的裸状态:
+// Engine.result 在未匹配帧会被清零 (WeaponIndex 变成 Go 零值 0, 不是 WEAPON_INDEX_NONE),
+// 直接读 WeaponIndex() 会把"没识别到"误判成第 0 把武器并一直重推它的参数
+var weaponState struct {
+	mu   sync.RWMutex
+	idx  int
+	to   *w.Weapon
+	name string
+}
+
+// pushedWeaponIdx 是最近一次推送用的武器下标, 仅用于把"状态变化"记成 Debug, 其余重推记 Trace
+var pushedWeaponIdx = matcher.WEAPON_INDEX_NONE
 
 var _ = debuggingWaitForInput()
 
@@ -385,11 +406,12 @@ func main() {
 	defer cwg.Cancel()
 
 	if *mhubAddr != "" {
-		client := remoteclient.Dial(*mhubAddr)
+		client := remoteclient.Dial(*mhubAddr, *mhubScript)
 		defer client.Close()
 		mover = client
 		log.Info().
 			Str("addr", *mhubAddr).
+			Str("script", *mhubScript).
 			Msg("mhub remote injection enabled")
 	}
 
@@ -533,6 +555,7 @@ func main() {
 	if matcherEngine != nil {
 		cwg.Go(r6sLoop)
 		cwg.Go(weaponAltLoop)
+		cwg.Go(weaponStateRepushLoop)
 	}
 	cwg.Go(cpuMeasureLoop)
 	cwg.Go(tmplWatchLoop)
@@ -583,10 +606,6 @@ func main() {
 }
 
 func r6sLoop(ctx context.Context) {
-	// the actual duration is exactly a second,
-	// more for template matching loop delay
-	const debounceInterval = 1500 * time.Millisecond
-
 	lastIndex := matcher.WEAPON_INDEX_NONE
 	var toNoneDebounce bool
 	var lastSwitchToNone time.Time
@@ -628,7 +647,7 @@ func r6sLoop(ctx context.Context) {
 				return
 			} else {
 				// debounce skipping
-				timeToNone := lastSwitchToNone.Add(debounceInterval)
+				timeToNone := lastSwitchToNone.Add(toNoneDebounceInterval)
 				if time.Now().Before(timeToNone) {
 					log.Trace().
 						Msg("switching skipped due to debounce")
@@ -640,8 +659,9 @@ func r6sLoop(ctx context.Context) {
 		}
 
 		lastIndex = newIndex
+		setWeaponState(newIndex, to, toName)
 		// 推送武器状态到 mhub (远程模式); 本地模式 no-op
-		pushWeaponState(to, toName, debugging)
+		syncWeaponState()
 	}
 
 	for {
@@ -655,8 +675,8 @@ func r6sLoop(ctx context.Context) {
 }
 
 // pushWeaponState 把当前武器类型与速度参数推送给 mhub 脚本
-// weapon 为 nil 时推送 "none"
-func pushWeaponState(to *w.Weapon, name string, debug bool) {
+// weapon 为 nil 时推送 "none"; periodic 为 true 表示这是周期重推 (日志降到 Trace, 避免刷屏)
+func pushWeaponState(to *w.Weapon, name string, debug, periodic bool) {
 	pusher, ok := mover.(statePusher)
 	if !ok {
 		return
@@ -683,19 +703,96 @@ func pushWeaponState(to *w.Weapon, name string, debug bool) {
 		}
 	}
 
-	pusher.SetRemoteState("WeaponType", weaponType)
-	pusher.SetRemoteState("FaSpeed", faSpeed)
-	pusher.SetRemoteState("FaFrac", faFrac)
-	pusher.SetRemoteState("SaSpeed", saSpeed)
-	pusher.SetRemoteState("SaFrac", saFrac)
+	// 推送失败必须可见: mhub 没起/连接断开/脚本不匹配时, 压枪会静默失效
+	var firstErr error
+	var failedKey string
+	push := func(key string, value any) {
+		err := pusher.SetRemoteState(key, value)
+		if err != nil && firstErr == nil {
+			firstErr = err
+			failedKey = key
+		}
+	}
+	push("WeaponType", weaponType)
+	push("FaSpeed", faSpeed)
+	push("FaFrac", faFrac)
+	push("SaSpeed", saSpeed)
+	push("SaFrac", saFrac)
 
-	log.Debug().
+	pushLog := log.Debug()
+	if periodic {
+		pushLog = log.Trace()
+	}
+	pushLog.
 		Str("WeaponType", weaponType).
 		Int("FaSpeed", faSpeed).
 		Int("FaFrac", faFrac).
 		Int("SaSpeed", saSpeed).
 		Int("SaFrac", saFrac).
 		Msg("weapon state pushed")
+	if firstErr != nil {
+		log.Warn().
+			Err(firstErr).
+			Str("key", failedKey).
+			Str("addr", *mhubAddr).
+			Msg("failed to push weapon state to mhub")
+	}
+}
+
+// setWeaponState 记录 r6sLoop 已确认的武器状态 (调用方需持有 weaponsMu 读锁)
+func setWeaponState(idx int, to *w.Weapon, name string) {
+	weaponState.mu.Lock()
+	weaponState.idx = idx
+	weaponState.to = to
+	weaponState.name = name
+	weaponState.mu.Unlock()
+}
+
+// pushCurrentWeaponState 把已确认的武器状态推给 mhub;
+// 未识别到 (idx < 0, 已过切换防抖) 推 "none" 归零
+// changed 为 false 表示这只是周期重推 (日志降到 Trace, 避免刷屏)
+func pushCurrentWeaponState(changed bool) {
+	weaponState.mu.RLock()
+	idx := weaponState.idx
+	to := weaponState.to
+	name := weaponState.name
+	weaponState.mu.RUnlock()
+
+	if idx < 0 {
+		pushWeaponState(nil, "N/A", debugging, !changed)
+		return
+	}
+	pushWeaponState(to, name, debugging, !changed)
+}
+
+// syncWeaponState 把当前已确认状态推给 mhub, 只在状态真变了时记 Debug
+func syncWeaponState() {
+	weaponState.mu.RLock()
+	idx := weaponState.idx
+	weaponState.mu.RUnlock()
+
+	pushCurrentWeaponState(idx != pushedWeaponIdx)
+	pushedWeaponIdx = idx
+}
+
+// weaponStateRepushLoop 周期重推已确认的武器状态:
+// mhub 重启/热重载脚本, 或推送时目标脚本未激活, 都会让状态丢失; 重推让其在一秒内自愈
+// 丢失识别时推 "none" 归零, 归零时机完全由 r6sLoop 的切换防抖决定, 不在这里另起一套判断
+func weaponStateRepushLoop(ctx context.Context) {
+	if _, ok := mover.(statePusher); !ok {
+		return // 本地注入模式没有状态接收方
+	}
+
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			pushCurrentWeaponState(false)
+		}
+	}
 }
 
 // altTracker 检测 Alt+Insert 切换武器备选速度档 (复刻原 recoil 行为)
@@ -718,14 +815,8 @@ func weaponAltLoop(ctx context.Context) {
 			next := !weaponAlt.Load()
 			weaponAlt.Store(next)
 			log.Info().Bool("weaponAlt", next).Msg("weapon alt toggled")
-			// Alt 档切换后重推当前武器状态
-			idx := matcherEngine.WeaponIndex()
-			if idx >= 0 {
-				wps := matcherEngine.Weapons()
-				if idx < len(wps) {
-					pushWeaponState(wps[idx], wps[idx].String(), debugging)
-				}
-			}
+			// Alt 档切换后重推当前已确认的武器状态 (按键触发, 不是周期重推, 记 Debug)
+			syncWeaponState()
 		}
 	}
 }
