@@ -74,8 +74,12 @@ var (
 	mhubAddr   = flag.String("mhub-addr", "", "mhub remote injection address (e.g. 127.0.0.1:9000, empty = local injection)")
 	mhubScript = flag.String("mhub-script", "RainbowSix", "mhub script name targeted by weapon state injection (empty = mhub primary script)")
 
-	targetTimeout = flag.Duration("target-timeout", 30*time.Minute,
-		"exit when the target game process (-game) is not detected for this long (0 disables)")
+	targetTimeout = flag.Duration("target-timeout", 30*time.Minute, "exit when the target game process (-game) is not detected for this long (0 disables)")
+
+	trtPlugin     = flag.String("trt-plugin", "", "TensorRT RTX EP plugin DLL path (default: $TENSOR_RT_EP_ABI_PATH or built-in 0.4.1 path)")
+	trtOpts       = flag.String("trt-opts", "", "extra TensorRT RTX EP provider options, k=v,k=v (overrides built-in defaults)")
+	trtAsyncAlloc = flag.Bool("trt-async-alloc", false, "keep the EP default cudaMallocAsync memory pool (default: use synchronous allocator)")
+	yoloDeviceIO  = flag.Bool("yolo-device-io", false, "build YOLO I/O tensors on device memory we allocate (zero-copy, faster)")
 )
 
 var log = logger.New("Streamer")
@@ -469,6 +473,14 @@ func main() {
 		detectorEngine = initDetector()
 	}
 	if detectorEngine != nil {
+		// CUDA 粘性错误 (error 700) 后 context 已报废, 不能继续跑也不能销毁 session,
+		// 只能整体退出: detector.Close 会跳过 GPU 资源释放
+		detectorEngine.SetFatalHandler(func(err error) {
+			log.Error().
+				Err(err).
+				Msg("local detector hit a fatal CUDA error, shutting down")
+			cwg.Cancel()
+		})
 		inferenceSources = append(inferenceSources, detectorEngine)
 	}
 	if remoteSource != nil {
@@ -964,10 +976,42 @@ func tmplWatchLoop(ctx context.Context) {
 	}
 }
 
+// parseKeyValues 解析 "k=v,k=v" 形式的参数
+func parseKeyValues(s string) map[string]string {
+	out := map[string]string{}
+	for _, kv := range strings.Split(s, ",") {
+		kv = strings.TrimSpace(kv)
+		if kv == "" {
+			continue
+		}
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok {
+			log.Warn().
+				Str("arg", kv).
+				Msg("invalid key=value pair, ignored")
+			continue
+		}
+		out[strings.TrimSpace(k)] = strings.TrimSpace(v)
+	}
+	return out
+}
+
 func initDetector() *detector.Engine {
 	cfg := detector.DefaultConfig()
 	cfg.Fps = 30
 	cfg.CropSize = cfg.InputSize * 2
+
+	if *trtPlugin != "" {
+		cfg.TensorRTPluginPath = *trtPlugin
+	}
+	if *trtAsyncAlloc {
+		// 回到 EP 默认的 cudaMallocAsync 异步显存池, 用于 A/B 对照
+		delete(cfg.TensorRTOptions, detector.SyncGpuAllocatorOption)
+	}
+	for k, v := range parseKeyValues(*trtOpts) {
+		cfg.TensorRTOptions[k] = v
+	}
+	cfg.UseDeviceBuffers = *yoloDeviceIO
 
 	if _, err := cuda.InitContextCiG(); err != nil {
 		log.Warn().
@@ -983,6 +1027,7 @@ func initDetector() *detector.Engine {
 		Bool("useCuda", cfg.UseCuda).
 		Bool("useTensorRT", cfg.UseTensorRT).
 		Str("tensorRTPluginPath", cfg.TensorRTPluginPath).
+		Interface("tensorRTOptions", cfg.TensorRTOptions).
 		Msg("initializing detector engine")
 
 	engine, err := detector.New(capturerServer, cfg)
@@ -991,7 +1036,9 @@ func initDetector() *detector.Engine {
 		return nil
 	}
 
-	log.Info().Msg("person engine initialized")
+	log.Info().
+		Str("ortVersion", engine.OrtVersion()).
+		Msg("person engine initialized")
 	return engine
 }
 

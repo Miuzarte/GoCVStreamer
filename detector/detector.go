@@ -5,8 +5,11 @@ import (
 	"image"
 	"image/draw"
 	"math"
+	"os"
+	"path/filepath"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gioui.org/layout"
@@ -20,9 +23,33 @@ import (
 	"github.com/Miuzarte/GoCVStreamer/ui"
 	"github.com/Miuzarte/GoCVStreamer/utils"
 	"github.com/getcharzp/go-vision/yolo26"
+	ort "github.com/getcharzp/onnxruntime_purego"
 )
 
 var log = logger.New("Detector")
+
+const (
+	defaultTensorRTPluginPath = `B:\Lib\TensorRT-RTX-EP-ABI-v0.4.1-cu13\onnxruntime_providers_nv_tensorrt_rtx.dll`
+
+	// tensorRTPluginEnv 覆盖插件 DLL 目录 (TENSOR_RT_EP_ABI_PATH)
+	tensorRTPluginEnv  = "TENSOR_RT_EP_ABI_PATH"
+	tensorRTPluginName = "onnxruntime_providers_nv_tensorrt_rtx.dll"
+
+	// SyncGpuAllocatorOption 关闭 TRT RTX 的 cudaMallocAsync 异步显存池
+	//
+	// 异步池在显存吃紧时会在 VRAM 尚有空闲的情况下失败 (驱动已知问题), 后果是 CUDA 粘性
+	// 错误 700 (illegal memory access), 之后整个 context 报废
+	// 该模型是固定 shape, 走同步 BFC arena 没有可测量的性能损失
+	SyncGpuAllocatorOption = "nv_use_sync_gpu_allocator"
+
+	// PersistentContextMemoryOption (EP 0.4.1+) execution context 显存常驻
+	//
+	// 不开时 EP 每次推理都会申请 / 释放一块 ~51MB 的 execution context 显存
+	// (yolobench 实测 120 帧 = 120 次 cudaMallocAsync/cudaFreeAsync)
+	// 用户崩溃日志里 cudaFreeAsync FAILED 的正是这块 buffer (pool_used=51328000)
+	// 开启后 120 帧只剩初始化那 1 次
+	PersistentContextMemoryOption = "nv_persistent_context_memory"
+)
 
 type Config struct {
 	Fps     int
@@ -35,11 +62,24 @@ type Config struct {
 	UseCuda            bool
 	UseTensorRT        bool
 	TensorRTPluginPath string
+	TensorRTOptions    map[string]string
+
+	// UseDeviceBuffers 输入 / 输出张量建在自分配显存上 (零拷贝 I/O)
+	// 实测比 host 张量快 20%~50%, 且不再产生 I/O 侧的设备分配
+	UseDeviceBuffers bool
 
 	// https://github.com/ultralytics/ultralytics/blob/main/ultralytics/cfg/datasets/coco.yaml
 	ResultIds utils.Set[int]
 
 	CropSize int // 中心裁剪边长: -1=屏幕短边 (自动), 0=不裁剪, >0=固定值
+}
+
+// resolveTensorRTPluginPath 优先使用 TENSOR_RT_EP_ABI_PATH 环境变量指定的目录
+func resolveTensorRTPluginPath() string {
+	if dir := os.Getenv(tensorRTPluginEnv); dir != "" {
+		return filepath.Join(dir, tensorRTPluginName)
+	}
+	return defaultTensorRTPluginPath
 }
 
 func DefaultConfig() Config {
@@ -53,7 +93,11 @@ func DefaultConfig() Config {
 		InputSize:          640,
 		UseCuda:            false,
 		UseTensorRT:        true,
-		TensorRTPluginPath: `B:\Lib\TensorRT-RTX-EP-ABI-v0.3.0-cu13\onnxruntime_providers_nv_tensorrt_rtx.dll`,
+		TensorRTPluginPath: resolveTensorRTPluginPath(),
+		TensorRTOptions: map[string]string{
+			SyncGpuAllocatorOption:        "1",
+			PersistentContextMemoryOption: "1",
+		},
 
 		ResultIds: utils.NewSet(0),
 	}
@@ -80,6 +124,10 @@ type Engine struct {
 
 	idleCheck func() bool
 	diag      *timing.Diag
+
+	// broken 表示 CUDA context 已被粘性错误破坏, 不能再碰任何 GPU / ORT 资源
+	broken  atomic.Bool
+	onFatal func(error)
 }
 
 func New(capturerServer *capturer.Server, cfg Config) (*Engine, error) {
@@ -91,6 +139,8 @@ func New(capturerServer *capturer.Server, cfg Config) (*Engine, error) {
 		UseCuda:            cfg.UseCuda,
 		UseTensorRT:        cfg.UseTensorRT,
 		TensorRTPluginPath: cfg.TensorRTPluginPath,
+		TensorRTOptions:    cfg.TensorRTOptions,
+		UseDeviceBuffers:   cfg.UseDeviceBuffers,
 	}
 
 	detEngine, err := yolo26.NewDetEngine(yCfg)
@@ -109,7 +159,32 @@ func New(capturerServer *capturer.Server, cfg Config) (*Engine, error) {
 	}, nil
 }
 
+// OrtVersion 返回底层 ONNX Runtime 版本
+func (e *Engine) OrtVersion() string {
+	if e.detEngine == nil {
+		return ""
+	}
+	return e.detEngine.OrtVersion()
+}
+
+// SetFatalHandler 注册致命错误 (CUDA 粘性错误) 回调, 通常用来取消整个程序
+func (e *Engine) SetFatalHandler(fn func(error)) {
+	e.onFatal = fn
+}
+
+// Broken 报告 CUDA context 是否已被粘性错误破坏
+func (e *Engine) Broken() bool {
+	return e.broken.Load()
+}
+
 func (e *Engine) Close() error {
+	if e.broken.Load() {
+		// context 已损坏: 销毁 session 会在 TRT EP 析构里再次触发非法访问并崩溃 (cudaFreeAsync
+		// 失败 -> Myelin / ICudaEngine 析构崩溃), 这里故意不释放 GPU 资源, 交给 OS 回收
+		log.Warn().
+			Msg("CUDA context corrupted, skip GPU resource cleanup")
+		return nil
+	}
 	if e.detEngine != nil {
 		e.detEngine.Destroy()
 	}
@@ -298,6 +373,20 @@ func (e *Engine) Run(ctx context.Context) {
 
 		err := e.Detect(detectImg)
 		if err != nil {
+			if ort.IsFatalError(err) {
+				// CUDA 粘性错误: context 已报废, 再推理只会刷屏, 再销毁 session 会直接崩溃
+				e.broken.Store(true)
+				e.mu.Lock()
+				e.personResults = nil
+				e.mu.Unlock()
+				log.Error().
+					Err(err).
+					Msg("fatal CUDA error, local detector disabled")
+				if e.onFatal != nil {
+					e.onFatal(err)
+				}
+				return
+			}
 			log.Warn().
 				Err(err).
 				Msg("yolo detection failed")

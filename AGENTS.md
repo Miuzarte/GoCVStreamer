@@ -91,6 +91,10 @@ logi-hidpp (HID++ 协议) ← mhub-logi (设备扩展) ← mhub-go (脚本运行
 -mhub-addr 127.0.0.1:9000  远程注入到 mhub (空=本地注入)
 -mhub-script RainbowSix   武器状态注入的目标 mhub 脚本名 (空=mhub primary 脚本)
 -target-timeout 30m      目标游戏进程 (-game) 连续未检测到该时长则退出自身; 0=禁用
+-trt-plugin <path>       TensorRT RTX EP 插件 DLL (默认 $TENSOR_RT_EP_ABI_PATH, 再退回内置 0.4.1 路径)
+-trt-async-alloc         回到 EP 默认的 cudaMallocAsync 异步显存池 (A/B 对照用)
+-trt-opts "k=v,k=v"      追加/覆盖 TRT RTX EP provider options
+-yolo-device-io          YOLO 输入/输出张量建在自分配显存上 (零拷贝, 更快; 默认关)
 ```
 
 ## 远程注入协议 (mhub)
@@ -207,6 +211,87 @@ streamer 依赖/联动以下独立仓库 (全部本地路径, 可直接改; 无 
 - 连续 `timeout` (默认 30m) 未检测到 → Warn 日志 + `cwg.Cancel()` 优雅退出 (所有循环响应 ctx.Done, defer 清理执行)
 - `-target-timeout 0` 或未知 game 模式时禁用
 
+## 本地 YOLO 推理 (ONNX Runtime + TensorRT RTX EP)
+
+`detector` 的本地人员检测走 ONNX Runtime + NVIDIA **TensorRT RTX EP ABI 插件** (`nv_tensorrt_rtx`), 跨仓库代码: streamer `detector` → `go-vision/yolo26` → `onnxruntime_purego`。
+
+### 组件与版本
+
+| 组件 | 位置 / 版本 |
+|---|---|
+| ONNX Runtime | `libs/onnxruntime-win-x64-gpu_cuda13-1.28.0/lib/onnxruntime.dll` (1.28.0, cu13) |
+| TRT RTX EP 插件 | `onnxruntime_providers_nv_tensorrt_rtx.dll`, **ABI v0.4.1-cu13** (2026-09-11 发布), 包内自带 TRT RTX 1.6 |
+| 插件目录 | 环境变量 `TENSOR_RT_EP_ABI_PATH` (当前 `B:\Lib\TensorRT-RTX-EP-ABI-v0.4.1-cu13`); 未设置时用 `detector.defaultTensorRTPluginPath` |
+| 引擎缓存 | 工作目录 `./trt_cache` (换 EP / TRT 版本后必须删掉重建, 否则可能加载旧引擎) |
+| 模型 | `B:\Git\go-vision\_weights\yolo26_weights\yolo26n.onnx`, 全静态 shape 1x3x640x640, 输出 `[1,300,6]` |
+
+版本组合很重要: EP 0.3 的兼容矩阵是 ORT 1.25+ / TRT RTX 1.5, 0.4.x 才处理 ORT 1.27+ 的 EP ABI 变更。**0.3.0 + ORT 1.28 属于超范围组合**, 且 0.4.0 修了 `OOB write on high-rank inputs` / `use-after-free in EP destructor` 等 bug。EP 选项表就在插件包里: `tensorrt_rtx_provider_options.h`。
+
+### 内存模型 (排查 GPU 问题前必须分清)
+
+- **host 张量**: `ort.NewTensor` 把 OrtValue 建在 Go 切片上 (CPU memory info), 由 EP 负责 H2D / D2H。**关键坑: 只有 `BindInput` 会真的把 host 数据拷到设备侧; 复用同一个 IoBinding 再调 `SynchronizeBoundInputs` 不会刷新设备数据**(`yolobench -probe` 实测: 黑白图输出完全一致)。所以 host 路径必须每帧重新 `BindInput`。
+- **device 张量 (零拷贝)**: `ort.NewTensorFromPtr` + `ort.CreateCudaMemoryInfo(0)`, 指针由我们自己 `cudaMalloc` (`yolo26/devmem_windows.go` 通过 cudart)。EP 判定"已经在本设备上"→ 不再分配/拷贝, 我们每帧自己做一次 H2D 和一次 D2H。**坑: MemoryInfo 的 vendor id 必须是 `ort.VendorIdNVIDIA`(0x10DE)**, 否则 ORT 报 `There's no data transfer registered for copying tensors from Device:[VendorId:0] to Device:[VendorId:4318]`。
+- **异步池 (`cudaMallocAsync`, EP 默认)**: 分配走 CUDA 流序内存池, 快; 但 NVIDIA 文档 (EP `doc/TECHNICAL_NOTES.md`) 明说它在部分 RTX 环境不可靠: CiG (D3D12/Vulkan interop) 下会直接失败, **Windows 上还能在 VRAM 尚有空闲时先耗光进程虚拟地址空间**(驱动已知问题), 失败随机、难复现。`nv_use_sync_gpu_allocator=1` 换成同步 BFC arena (cudaMalloc/cudaFree + 池化), 实测代价约 14% 吞吐。
+- **execution context 显存**: TRT 每次推理需要一块约 51MB 的 scratch。**不开 `nv_persistent_context_memory` 时 EP 每帧都要 malloc/free 这块 51MB**(异步池下即每帧一次 `cudaMallocAsync` + `cudaFreeAsync`, 占那个 64MB 池的 80%); 开启后 120 帧只剩初始化 1 次。
+
+### 默认 EP 选项 (detector.DefaultConfig)
+
+```go
+TensorRTOptions: map[string]string{
+    "nv_use_sync_gpu_allocator":    "1", // 关掉 cudaMallocAsync 异步显存池
+    "nv_persistent_context_memory": "1", // execution context 显存常驻 (EP 0.4.1+)
+}
+```
+
+- `-trt-opts "k=v,k=v"` 追加/覆盖任意 EP 选项; `-trt-async-alloc` 回到异步池做 A/B; `-yolo-device-io` 打开零拷贝设备张量 (默认关)
+- `detector.SyncGpuAllocatorOption` / `detector.PersistentContextMemoryOption` 是这两个 key 的常量
+- **设备张量 (`-yolo-device-io`) 保持默认关** (2026-09-13 决定): 满速 harness 里快 5%~13%, 但实战是 30fps 采集受限, `detection_cost_ms` 两者都是 8.00 (metrics 0.5ms 粒度, 差异 <1ms 不可见); 而它引入"我们自己 cudaMalloc / 管生命周期"的新路径, 需要在彩六长局 (唯一能复现 700 的场景) 验证过再提默认
+  - 提默认前必须补: 启动自检 (黑/白/渐变三图输出哈希不能全相同, 否则说明输入没进设备侧) + cudart/分配失败自动回退 host 张量并打印状态, 而不是硬失败
+
+### 实测数据 (2026-09-13, `yolobench` 1500 帧热态, 640x640 含预处理)
+
+| 配置 | fps | 每帧 | 每帧设备分配 |
+|---|---|---|---|
+| host 张量 + 异步池 (旧默认) | 141.0 | 7.07ms | 125 次 / 120 帧 |
+| host 张量 + 同步分配器 | 123.5 | 8.08ms | 0 (arena 复用) |
+| device 张量 + 同步分配器 | 129.4 | 7.71ms | 0 |
+| device 张量 + 异步池 | 159.7 | 6.25ms | 125 次 / 120 帧 |
+| 任意 + `nv_persistent_context_memory=1` | - | - | **1 次 / 120 帧** |
+| device 张量 + 异步 + persistent | 175.1 | 5.69ms | ~0 |
+
+streamer 实测 (`/metrics` 的 `detection_cost_ms`, 2560x1440 采集 + 1280 中心裁剪): 同步 + persistent 之后 **13.50ms → 8.00ms**。
+
+### 复现 / 对照 harness (`B:\Git\go-vision\cmd\yolobench`)
+
+```powershell
+cd B:\Git\go-vision
+$env:YOLO_MODEL_PATH='B:\Git\go-vision\_weights\yolo26_weights\yolo26n.onnx'
+$env:ORT_LIB_PATH='B:\Git\GoCVStreamer\libs\onnxruntime-win-x64-gpu_cuda13-1.28.0\lib\onnxruntime.dll'
+go run ./cmd/yolobench -probe                     # 输入传播自检 (黑白图输出必须不同)
+go run ./cmd/yolobench -iter 6000 -burn-vram 5000  # 占显存压测 (模拟游戏吃显存)
+go run ./cmd/yolobench -sync-alloc=false           # 异步池 A/B
+go run ./cmd/yolobench -device-io                  # 零拷贝设备张量
+```
+
+`-probe` 是判断"输入到底有没有进到设备侧"的唯一可靠手段, **任何绑定方式改动后必须跑**; `-anim` 会让输出 hash 逐帧变化, 收尾会报 `input propagation ok` 或 WARN。引擎缓存默认丢到 `%TEMP%\yolobench_trt_cache`。
+
+### 日志与现场排查
+
+- **`ORT_LOG_LEVEL=1`** (env, `go-vision/onnx.go` 读取): 打开 ORT/EP 的 INFO 日志, 能看到 `[NvTensorRTRTX EP] Using synchronous GPU allocator...`、`CudaMempoolAllocator::DoAlloc/DoFree` 逐笔分配、`ep_arena` 扩展、`CUDA graph strategy` 等。**默认 `LogError` 会把 EP 的告警与分配追踪全部吞掉**, 排 GPU 问题必须开 (nvidia 侧的 `E:` 错误不受影响)。
+- Windows 系统日志 `nvlddmkm` **事件 153** (`Error occurred on GPUID`): GPU 侧真实异常 (Xid 级)。2026-09-12 那次与 streamer 报错**同一秒**, 一个月内 17 次且都发生在彩六。
+- `compute-sanitizer --tool memcheck --destroy-on-device-error kernel` 可定位越界 kernel (本机 CUDA toolkit 缺 sanitizer 组件, 需单独装)。
+
+### CUDA 700 粘性错误 (2026-09-12 现场)
+
+现场链路: 彩六运行中 `CudaMempoolAllocator::DoFree: cudaFreeAsync FAILED ... error=700 | pool_reserved=67108864 pool_used=51328000` → 同帧 `ExecuteKernel` 失败 (报在 `NvTensorRTRTXExecutionProvider_*` 节点上) → 之后每帧 `BindInput` 都失败 → 退出时 `releaseSession` 内 Myelin / `ICudaEngine` 析构再次触发非法访问 → Go 进程 `0xc0000005` 崩溃。**只彩六触发, CS2 不触发** (彩六吃显存多得多)。
+
+- 700 是 **context 级粘性错误**: 报错总是出现在"下一个无辜的调用"上 (同类机制见 microsoft/onnxruntime#32342), 所以 `DoFree` 那行只是最先撞上的地方, 不是元凶
+- `detector.Run` 用 `ort.IsFatalError(err)` 识别粘性错误: 打 Error、清空结果、回调 `onFatal` (main 里接 `cwg.Cancel()`) 并退出循环, **不再每 100ms 空转重试刷屏**
+- `detector.Close()` 在 broken 时**故意不释放 GPU 资源** (在损坏的 context 上销毁 session 必崩), 交给 OS 回收
+- `cuda.DestroyCurrentContext` 改成 `cuDevicePrimaryCtxRelease(device)`: 旧实现 `cuCtxGetCurrent` + `cuCtxDestroy` 既用错 API (primary context 不能 destroy, 会连带毁掉 ORT/TRT 在用的 context), 又假设了 per-thread 的 current context
+- 未解: 根因未 100% 证明 (异步池 + 4~5GB 静态显存压力跑 6000 帧未复现)。但崩溃日志里 free 失败的正是那块 51MB execution context, 现在它被 `nv_persistent_context_memory` 从每次推理改成了常驻
+- 复发时: `set ORT_LOG_LEVEL=1` 抓现场, 重点看最后一笔 `DoAlloc/DoFree`、是否出现 pool 回退告警, 以及系统日志里是否有同秒的 `nvlddmkm` 153
+
 ## 代码约定
 
 与兄弟仓库 (mhub-go/mhub-logi/logi-hidpp) 一致, 见各自 AGENTS.md:
@@ -234,3 +319,6 @@ streamer 依赖/联动以下独立仓库 (全部本地路径, 可直接改; 无 
 
 - `go vet` 在 `wgc/wgc.go` 220/232 行报两处 `possible misuse of unsafe.Pointer` (syscall 句柄转换), 为预先存在问题, 与功能无关, 不要顺手"修复"
 - 本地注入模式 (`LocalMover`) 不实现 `statePusher`, pushWeaponState 为 no-op
+- 改 YOLO 绑定方式 (host / device 张量, IoBinding 复用) 后**必须跑 `yolobench -probe`**: host 张量不重新 `BindInput` 就不会刷新设备数据, 表现是"检测框永远停在第一帧"
+- 换 TRT RTX EP / TRT 版本后删掉 `trt_cache/`; `-yolo-device-io` 依赖 cudart (`cudart64_13/12.dll`), 缺失会在引擎初始化时报错而不是每帧失败
+- GPU 相关排查一律先 `set ORT_LOG_LEVEL=1` (详见"本地 YOLO 推理"一节)

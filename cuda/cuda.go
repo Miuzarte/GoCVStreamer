@@ -46,6 +46,7 @@ var (
 	procCuDeviceGetAttribute       func(pi *int32, attrib int32, dev int32) int32
 	procCuCtxCreate                func(pctx *uintptr, params unsafe.Pointer, flags uint32, dev int32) int32
 	procCuDevicePrimaryCtxRetain   func(pctx *uintptr, dev int32) int32
+	procCuDevicePrimaryCtxRelease  func(dev int32) int32
 	procCuDevicePrimaryCtxSetFlags func(dev int32, flags uint32) int32
 	procCuCtxPushCurrent           func(ctx uintptr) int32
 	procCuCtxPopCurrent            func(pctx *uintptr) int32
@@ -65,6 +66,7 @@ func ensureNvInit() error {
 		purego.RegisterLibFunc(&procCuDeviceGetAttribute, uintptr(h), "cuDeviceGetAttribute")
 		purego.RegisterLibFunc(&procCuCtxCreate, uintptr(h), "cuCtxCreate")
 		purego.RegisterLibFunc(&procCuDevicePrimaryCtxRetain, uintptr(h), "cuDevicePrimaryCtxRetain")
+		purego.RegisterLibFunc(&procCuDevicePrimaryCtxRelease, uintptr(h), "cuDevicePrimaryCtxRelease")
 		purego.RegisterLibFunc(&procCuDevicePrimaryCtxSetFlags, uintptr(h), "cuDevicePrimaryCtxSetFlags")
 		purego.RegisterLibFunc(&procCuCtxPushCurrent, uintptr(h), "cuCtxPushCurrent")
 		purego.RegisterLibFunc(&procCuCtxPopCurrent, uintptr(h), "cuCtxPopCurrent")
@@ -111,6 +113,17 @@ func retainPrimaryContext(dev int32) (uintptr, error) {
 		return 0, fmt.Errorf("cuDevicePrimaryCtxRetain: %d", r)
 	}
 	return ctx, nil
+}
+
+// releasePrimaryContext 释放 retainPrimaryContext 持有的引用
+//
+// primary context 只能用 cuDevicePrimaryCtxRelease 释放, cuCtxDestroy 对它是未定义行为,
+// 会连带毁掉 ORT / TensorRT 正在使用的 context
+func releasePrimaryContext(dev int32) error {
+	if r := procCuDevicePrimaryCtxRelease(dev); CUresult(r) != CUDA_SUCCESS {
+		return fmt.Errorf("cuDevicePrimaryCtxRelease: %d", r)
+	}
+	return nil
 }
 
 func setPrimaryContextFlags(dev int32, flags uint32) error {
