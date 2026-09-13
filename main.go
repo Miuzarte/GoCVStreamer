@@ -70,6 +70,8 @@ var (
 	streamCrop    = flag.Int("streamcrop", 1280, "WebSocket stream center crop size (-1=screen short edge, 0=no crop)")
 	nosender      = flag.Bool("nosender", false, "disable WebSocket stream server")
 	streamTtl     = flag.Int("streamttl", 500, "remote results TTL in ms (0 disables remote results)")
+	// 传的是 JPEG (不可压), permessage-deflate 只会白吃两端 CPU, 默认关; 打开仅用于 A/B
+	streamCompress = flag.Bool("streamcompress", false, "allow permessage-deflate on the stream (default off)")
 
 	mhubAddr   = flag.String("mhub-addr", "", "mhub remote injection address (e.g. 127.0.0.1:9000, empty = local injection)")
 	mhubScript = flag.String("mhub-script", "RainbowSix", "mhub script name targeted by weapon state injection (empty = mhub primary script)")
@@ -441,6 +443,7 @@ func main() {
 			Fps:         *streamFps,
 			JpegQuality: *streamQuality,
 			CropSize:    *streamCrop,
+			Compress:    *streamCompress,
 		}, capturerServer)
 		remoteSource = detector.NewRemoteSource(time.Duration(*streamTtl) * time.Millisecond)
 		streamServer.OnResult = func(res sender.RemoteResult, latency time.Duration) {
@@ -505,7 +508,11 @@ func main() {
 		if matcherEngine != nil {
 			detectorEngine.SetIdleChecker(func() bool { return matcherEngine.InIdle() })
 		}
+	}
 
+	// 辅助只看"有没有检测结果源", 不看本地 detector: -noyolo 时远端 (手机 NPU)
+	// 结果仍会进 inferenceSources, 瞄准辅助必须照常工作
+	if len(inferenceSources) != 0 {
 		rawTracker, err := mouse.StartRawInput()
 		if err != nil {
 			log.Warn().
@@ -516,7 +523,7 @@ func main() {
 			assistCfg := assist.DefaultConfig()
 			switch *game {
 			case "r6s":
-				assistCfg.Speed = 8
+				assistCfg.Speed = 6
 				assistCfg.InnerRatio = 0.5
 				assistCfg.RequireKeys = []keystate.KeyCode{
 					keystate.VK_RBUTTON,
@@ -1094,7 +1101,8 @@ func (d *metricsDrawer) Draw(gtx layout.Context, s ui.DScale) {
 			fmt.Fprintf(&sb, " | Local: %.1fms", m.DetectionCostMs)
 		}
 		if m.StreamFresh {
-			fmt.Fprintf(&sb, " | Remote: net %.1fms + inf %.1fms", m.StreamNetworkMs, m.StreamInferenceMs)
+			fmt.Fprintf(&sb, " | Remote: net %.1fms + cpu %.1fms + inf %.1fms (%.0fKB)",
+				m.StreamNetworkAvgMs, m.StreamCpuAvgMs, m.StreamInferenceAvgMs, m.StreamFrameBytes/1024)
 		}
 		sb.WriteString(" |")
 		sb.WriteByte('\n')

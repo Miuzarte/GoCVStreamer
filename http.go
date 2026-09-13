@@ -43,9 +43,25 @@ type MetricsSnapshot struct {
 	StreamLastCount   int     `json:"stream_last_count"`
 	StreamLatencyMs   float64 `json:"stream_latency_ms"`
 	StreamInferenceMs float64 `json:"stream_inference_ms"`
-	StreamNetworkMs   float64 `json:"stream_network_ms"`
-	StreamFresh       bool    `json:"stream_fresh"`
-	StreamAgeMs       float64 `json:"stream_age_ms"`
+	// StreamCpuMs 为手机侧 Execute 之外的 CPU 耗时 (解码/量化/后处理),
+	// 它不属于网络, 计算 StreamNetworkMs 时必须减掉
+	StreamCpuMs    float64 `json:"stream_cpu_ms"`
+	StreamDecodeMs float64 `json:"stream_decode_ms"`
+	StreamQuantMs  float64 `json:"stream_quant_ms"`
+	StreamPostMs   float64 `json:"stream_post_ms"`
+	// StreamReadMs 为手机等待下一帧的时间: 持续 ≈0 说明手机侧已饱和 (在排队)
+	StreamReadMs float64 `json:"stream_read_ms"`
+	// StreamNetworkMs 为真正的链路 + PC 侧耗时 = 全链路延迟 - 手机推理 - 手机 CPU
+	StreamNetworkMs float64 `json:"stream_network_ms"`
+	// 平均口径 (EMA, 约 1s 窗口): 单帧值噪声 ±3ms, A/B 只看这几个
+	StreamLatencyAvgMs   float64 `json:"stream_latency_avg_ms"`
+	StreamInferenceAvgMs float64 `json:"stream_inference_avg_ms"`
+	StreamCpuAvgMs       float64 `json:"stream_cpu_avg_ms"`
+	StreamNetworkAvgMs   float64 `json:"stream_network_avg_ms"`
+	StreamQueueAvgMs     float64 `json:"stream_queue_avg_ms"`
+	StreamFrameBytes     float64 `json:"stream_frame_bytes"`
+	StreamFresh          bool    `json:"stream_fresh"`
+	StreamAgeMs          float64 `json:"stream_age_ms"`
 
 	Cpu       float64 `json:"cpu"`
 	Debugging bool    `json:"debugging"`
@@ -126,9 +142,26 @@ func snapshotMetrics() (m MetricsSnapshot) {
 				m.StreamLastCount = s.LastCount
 				m.StreamLatencyMs = float64(s.LastLatency) / ms
 				m.StreamInferenceMs = float64(s.LastInference) / ms
-				m.StreamNetworkMs = m.StreamLatencyMs - m.StreamInferenceMs
+				m.StreamCpuMs = float64(s.LastCpu) / ms
+				m.StreamDecodeMs = float64(s.LastDecode) / ms
+				m.StreamQuantMs = float64(s.LastQuant) / ms
+				m.StreamPostMs = float64(s.LastPost) / ms
+				m.StreamReadMs = float64(s.LastRead) / ms
+				// 手机自己的 CPU 阶段 (解码/量化/后处理) 不是网络: 减掉才是真正的链路耗时
+				// 手机不上报 cpu_ms 时 (老客户端) 这里退化成 latency - inference
+				m.StreamNetworkMs = m.StreamLatencyMs - m.StreamInferenceMs - m.StreamCpuMs
 				if m.StreamNetworkMs < 0 {
 					m.StreamNetworkMs = 0
+				}
+				// 平均口径: 单帧值噪声大, A/B 比较只看这几项
+				m.StreamLatencyAvgMs = float64(s.AvgLatency) / ms
+				m.StreamInferenceAvgMs = float64(s.AvgInference) / ms
+				m.StreamCpuAvgMs = float64(s.AvgCpu) / ms
+				m.StreamQueueAvgMs = float64(s.AvgQueue) / ms
+				m.StreamFrameBytes = s.AvgBytes
+				m.StreamNetworkAvgMs = m.StreamLatencyAvgMs - m.StreamInferenceAvgMs - m.StreamCpuAvgMs
+				if m.StreamNetworkAvgMs < 0 {
+					m.StreamNetworkAvgMs = 0
 				}
 			}
 			if age, ok := remoteSource.Age(); ok {

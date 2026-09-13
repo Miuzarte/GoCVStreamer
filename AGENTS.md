@@ -65,7 +65,10 @@ logi-hidpp (HID++ 协议) ← mhub-logi (设备扩展) ← mhub-go (脚本运行
 .\build.ps1 debug            # -tags "debug,customenv" -gcflags "all=-N -l" (DEBUGGING=true, WGC 边框可见)
 .\build.ps1 run              # go run
 .\build.ps1 bench            # capturebench.exe
-.\build.ps1 test             # go test -tags "customenv" ./... (也可 .\build.ps1 test ./assist/...)
+.\build.ps1 test             # go test -tags "customenv" ./...
+                             # 单包: .\build.ps1 -Command test -Packages ./assist/...
+                             # 注意第 2 个位置参数是 -Tags 不是包路径, .\build.ps1 test ./assist/... 会把
+                             # "./assist/..." 当成 build tag (会让 sender/wgc 编译失败)
 .\build.ps1 wgcdll           # 用 MSVC 编译 wgc_helper.dll (需要 VS2022+, 平时不自动重建)
 ```
 
@@ -84,11 +87,12 @@ logi-hidpp (HID++ 协议) ← mhub-logi (设备扩展) ← mhub-go (脚本运行
 -source dxgi|obs|wgc|auto 采集源, 默认 auto (DXGI 优先, 失败回退 WGC)
 -window <名>|auto        WGC 窗口采集: 进程名/窗口标题, auto=按 -game 进程名
 -nogui                   无 GUI 窗口
--noyolo                  禁用本地 YOLO
+-noyolo                  禁用本地 YOLO (远端 NPU 结果仍在, assist 照常工作)
 -noopencv                禁用 OpenCV 模板匹配
 -autodisplay             跳过显示器选择, 取最大分辨率
 -port :8080 / -nohttp    HTTP metrics
 -stream :9090 / -streamfps / -streamquality / -streamcrop / -nosender / -streamttl   WebSocket 推流
+-streamcompress          允许 permessage-deflate (帧是 JPEG, 压缩率 1.000, 只白吃两端 0.39ms/帧 CPU; 默认关, 仅 A/B 用)
 -mhub-addr 127.0.0.1:9000  远程注入到 mhub (空=本地注入)
 -mhub-script RainbowSix   武器状态注入的目标 mhub 脚本名 (空=mhub primary 脚本)
 -target-timeout 30m      目标游戏进程 (-game) 连续未检测到该时长则退出自身; 0=禁用
@@ -193,10 +197,27 @@ streamer 依赖/联动以下独立仓库 (全部本地路径, 可直接改; 无 
 ### Inferencer/goApp — Termux 直连 QNN HTP 跑 YOLO (`B:\Git\Inferencer\goApp`, 模块名 `Inferencer`)
 
 - 在 Termux (非 root, SELinux Enforcing) 用 Go 直接调 QNN SDK C API, 加载官方 ONNX 内嵌 EPContext 二进制 (`models/ctx_v73.bin` / `ctx_v81.bin`) 跑 YOLO26n; 作为 **GoCVStreamer 的远程推理客户端** (WebSocket)
-- 单文件二进制约 4.5MB, 无 JVM/无 ORT; 小米 13 (SD8Gen2/HTP v73) 单帧 19~23ms; go 1.26, deps 仅 `github.com/coder/websocket` + `github.com/rs/zerolog`
-- 目录: `cmd/{extract_ctx,infer,streamer}`, `qnn/` (cgo dlopen + QNN provider vtable), `yolo/` (letterbox/quant + argmax/NMS), `jpeg/` (快路径解码), `logger/logging`, `models/` (EPContext, onnx 不入库), `qnn-headers/` (SDK 头文件不入库), `scripts/` (部署库)
+- 单文件二进制: `htpbench` 4.8MB, `streamer` 10.3MB (含 turbojpeg), 无 JVM/无 ORT; go 1.26, deps 仅 `github.com/coder/websocket` + `github.com/rs/zerolog`; 手机侧 `execute` 实测 小米13 15.8ms -> 5.47ms, 小米17 16.6ms -> 3.32ms (见下方 P4 条目)
+- 目录: `cmd/{extract_ctx,infer,streamer,htpbench}`, `qnn/` (cgo dlopen + QNN provider vtable + perf infrastructure), `qnn/perf` (纯 Go 档位表, 可离线 `go test`), `yolo/` (letterbox/quant + argmax/NMS), `jpeg/` (快路径解码), `logger/logging`, `models/` (EPContext, onnx 不入库), `qnn-headers/` (SDK 头文件不入库), `scripts/` (部署库 + 交叉编译 + 设备启动脚本)
 - 流式协议 (与 flutterApp/androidApp 一致): 收 `[4B frame_id LE][JPEG]` (640×640), 回 `{"frame_id":N,"detections":[{"x1","y1","x2","y2","score","class","class_name"}],"inference_ms":M}`; 与 streamer `sender.RemoteDetection/RemoteResult` 同构, 经 `Server.OnResult` → `detector.RemoteSource.SetResults` 合并进本地结果
-- `-class 0` (person), `-conf 0.45`, `-affinity N` (固定推理线程到超大核, 忙等重试, 断线重连后自动重绑), `-bench` (各阶段耗时), `-v`
+- `-class 0` (person), `-conf 0.45`, `-affinity N` (固定推理线程到超大核, 忙等重试, 断线重连后自动重绑), `-bench` (各阶段耗时), `-v`, `-compress` (permessage-deflate, 默认关)
+- **分段上报 (2026-09-13 加)**: 回包 JSON 里除 `inference_ms` (只有 NPU `Execute`) 外还带 `cpu_ms` (各 CPU 段之和) 与 `decode_ms`/`quant_ms`/`post_ms`/`read_ms`/`queue_ms`/`frame_bytes`, PC 端靠它算出真正的 `stream_network_ms`; 老客户端不报时退化为旧口径
+- **两代机器的快核都在末尾序号**: 小米13 是 3小+4大+1超大 (超大核 7), 小米17 是 6大+2超大 (超大核 6,7), 所以 `-affinity` 支持集合写法 (`7` / `4-7` / `4,5,6,7`), 换机不用改语义
+- **串行 vs 流水线 (2026-09-13 实测, 成对交替)**: 默认串行 `-affinity 7` 单帧延迟最低 (latency 29.1ms = net 8.0 + cpu 6.3 + execute 14.8); `-pipeline -affinity 3-7` 在 30fps 下多 ~1.1ms, 但 60fps 源能跑到 58.6fps 不掉帧 (串行上限 ~49fps), 属于高帧率/抗积压保险。**串行配宽集合反而更慢** (cpu 10.5ms, 线程被调度到低频大核)
+- **adb reverse 走 USB 不可行 (2026-09-13 实测)**: `adb -s <serial> reverse tcp:9090 tcp:9090` 后手机连 `ws://127.0.0.1:9090`, 帧能走但 `net` 从 Wi-Fi 的 8.0ms 涨到 23.5ms (adb 用户态代理 + USB 帧协议), latency 43.8ms。另注意 reverse 映射在设备重连 (transport_id 变化) 后会**静默消失**, 需要重新执行。要试有线只能考虑 USB 网络共享 (RNDIS)
+- **`-fastjpeg` (FASTDCT|FASTUPSAMPLE) 的精度代价**: 平均像素差 1.16/255、最大 41; 真实流帧上 person 分数前 3 名完全一致、第 4 名差 1.7%、框边缘差 ≤5px@640; 换来 decode 9.5ms → 4.8ms (122KB 帧)。要位级一致用 `-fastjpeg=false`
+- **手机 CPU 段会漂移**: 同一配置 `cpu_ms` 实测 5.7~10.6ms, worker 核频率 0.86~1.6GHz (屏幕/热/调度状态), 任何 A/B 必须**交替成对**测, 跨时段比较会被状态差吃掉 (这也是当初"net 比 inference 还大"的成因之一: 旧口径把 8ms 手机 CPU 算进了网络)
+- **P4 完成: HTP 性能档位 (2026-09-13 实测)**: `qnn/bridge.c` 原来只设了 `QNN_HTP_DEVICE_CONFIG_OPTION_ARCH`, 而 `QnnDevice_getInfrastructure` → `createPowerConfigId` → `setPowerConfig` 能把 DSP 的电压角钉住。手机端新增 `-htp-perf <档位>` (档位表在 `qnn/perf/perf.go`, 可离线 `go test`) 与 `cmd/htpbench` (单进程内轮询多档位, 按 33ms 占空比测 `graphExecute`)。小米13 结果: **手机侧 execute 14.8ms → 5.47ms (-63%)**, 端到端 3 对交替一致, 见 `Inferencer/goApp/README.md` 的「HTP 性能档位」一节
+  - **不投票时 DSP 只跑在 DVFS 默认档**: 这是之前 14.8ms 的真正来源, 不是算子本身的开销; 档位效果单调 (burst 5.80 < sustained 6.04 < balanced 7.34 < power_saver 11.22 < default 15.81), 说明是真实的频率效应
+  - **4 分钟连续跑无任何热衰减** (burst 稳定 5.47±0.03, fps 恒 30, DSP 温度只 +3C, battery 41C) → `run_device.sh` 默认档位已改成 `burst`; 保守档 `sustained_high_performance` 只慢 0.37ms
+  - **凑效的旋钮只有两个**: DCVS_V3 的电压角 + `RPC_POLLING_TIME` (0.44ms); `RPC_CONTROL_LATENCY` 与 `sleepDisable` 在本机实测无效果
+  - **投票不改变数值结果**: `htpbench -hash-output` 下各档位输出张量的 FNV-1a 哈希完全相同 (`9be3fc3889d96fc7`), 所以没有精度/检测回归
+  - **投票是进程级且不可撤销**: 一旦下发过档位, "不下发" 的 `default` 就回不去, 所以基线必须在新进程里测
+  - `read_ms` 从 10.2ms 涨到 22.2ms 表示手机端余量翻倍; 顺带 CPU 段也变快 (decode 4.7→3.3, quant 3.1→2.2, 频率被带起来)
+  - **`qnn/bridge.c` 与 `cmd/htpbench` 退出时必须 `os.Exit`**: Termux 下正常 return 会让 QNN/厂商库的 atexit 清理触发 SIGABRT (`signal arrived during cgo execution`)
+- **小米13 上 `pgrep -x` / `pkill -x` 全都匹配不到**: `/proc/<pid>/comm` 读不到, procps 静默返回空, 于是一次都没杀掉旧进程 → 6 个 streamer 同时抢一个 HTP, 测出 execute 65ms 的假结果。杀进程要用 `pgrep -f '^\./streamer'` / `kill -9 <pid>`, 或直接记 `$!`; `scripts/build_android.ps1` 的 push 前置检查已按此改
+- **PC 端 streamer 在游戏非前台时会降到 `FpsIdle=2`** (`main.go:474` 硬编码), 于是只能喂出 2fps, 手机侧测不到真实 30fps 占空比。要在没有游戏前台时测手机端, 用 `Inferencer/goApp/tmp/wstest`(不入库) 直接喂 640x640 JPEG
+- **两台手机都可用于远程推理 (2026-09-13)**: 小米13 (v73) `192.168.1.103:8022` 与小米17 (v81, Android 16) `192.168.1.102:8022`, 都是 `~/streamer` + 同一个 `run.sh` (差异只在 `device.env`: `STREAM_ARCH`/`STREAM_CTX`), 同一个 arm64 二进制不用重编 (`-arch` 在真机上被 QNN 忽略, 架构由 ctx binary 决定)。`execute`: 13 是 15.8→5.47ms, 17 是 16.6→**3.32ms** (都是 burst)。换机部署清单与两个 Android 16 特有的库坑 (少复制 AIDL 的 `vendor.qti.hardware.dsp-V1-ndk.so`; 多复制 `/system/lib64` 已有的 `libc++.so` 会遮蔽系统版本) 见 `Inferencer/goApp/PLAN.md` 第 7 节
 - 关键坑位: vendor 库复制到 `$PREFIX/lib` 并按依赖序预加载 `libvmmem.so → vendor.qti.hardware.dsp@1.0.so → libcdsprpc.so`, 否则 fastrpc 失败; QNN graph I/O 是 quint16, 需量化/反量化 (输入 `scale=1/65536`, 输出 `≈0.010455`, offset 0); execute 必须带 binaryInfo tensor id 否则 error 6004; 直连输出是 640 尺度像素, 归一化别再 `*640`; Termux 下 `QnnContext_free` 触发 SIGABRT, 销毁跳过 QNN free; 退出直接 `os.Exit` 跳过 QNN 清理
 - Android 调度器空闲收窄可调度核集 (常 `0x5f` 不含 CPU7), 持续负载约 1s 后放开到 `0xff` 才绑成功; 锁 CPU 用 `runtime.LockOSThread` 再 `sched_setaffinity(pid=0)`
 
@@ -307,6 +328,8 @@ go run ./cmd/yolobench -device-io                  # 零拷贝设备张量
 - 门控依据是"结果发布到现在", 等价说法是"信息年龄 > 33ms + 该结果的采集→发布耗时"时不再注入。信息年龄 (`now - At`) 在健康 30FPS 下本身就会涨到约 45ms (发布后一直等到下一个结果), 直接拿它对 33ms 做门控会在正常帧率下就砍掉约一半 tick, 破坏平滑
 - 选源 (本地 vs 远端) 改用**信息年龄最小**的源, 不再按推理耗时: 远端推理可能很快, 但链路本身很旧
 - 帧龄口径 (都在 `/metrics`): `detection_pipeline_ms` = 采集→发布 (排队取帧 + 预处理 + 推理), `detection_age_ms` = 采集→现在, `detection_interval_ms` = 结果间隔 EMA, `stream_age_ms` = 远程结果帧龄
+- 远程结果的分段口径 (手机上报 `cpu_ms` 之后才有意义): `stream_latency_ms` = PC 写帧→收到回包的全链路; `stream_inference_ms` = 手机 NPU `Execute`; `stream_cpu_ms` = 手机 Execute **之外**的全部 CPU (解码/量化/后处理/marshal, 细分 `stream_decode_ms`/`stream_quant_ms`/`stream_post_ms`); `stream_read_ms` = 手机等待下一帧的空闲时间 (**持续 ≈0 说明手机已饱和在排队**); `stream_network_ms` = `latency - inference - cpu_ms` 才是真正的链路 + PC 侧耗时。**旧口径 `latency - inference` 会把手机自己的 8ms CPU 算成"网络", 导致 net 看着比 inference 还大**
+- 除单帧瞬时值外还有 EMA 平均口径: `stream_latency_avg_ms` / `stream_inference_avg_ms` / `stream_cpu_avg_ms` / `stream_network_avg_ms` / `stream_queue_avg_ms` / `stream_frame_bytes` (α=1/32, 30fps 下约 1s 窗口)。**单帧瞬时值噪声 ±3ms, A/B 比较只看这几个平均值**; `stream_queue_avg_ms` 是手机流水线内部排队 (串行模式恒为 0), 把它从 net 里再减掉才是纯链路+PC; `stream_frame_bytes` 用来确认两次 run 的画面内容是否可比
 
 ### 检测循环是"新帧驱动 + 速率限制"
 
@@ -358,5 +381,7 @@ go run ./cmd/yolobench -device-io                  # 零拷贝设备张量
 - 改 YOLO 绑定方式 (host / device 张量, IoBinding 复用) 后**必须跑 `yolobench -probe`**: host 张量不重新 `BindInput` 就不会刷新设备数据, 表现是"检测框永远停在第一帧"
 - 换 TRT RTX EP / TRT 版本后删掉 `trt_cache/`; `-yolo-device-io` 依赖 cudart (`cudart64_13/12.dll`), 缺失会在引擎初始化时报错而不是每帧失败
 - GPU 相关排查一律先 `set ORT_LOG_LEVEL=1` (详见"本地 YOLO 推理"一节)
-- 改 assist 门控 / 选源 / 检测循环后必须跑 `.\build.ps1 test ./assist/...` (门控与选源都有单测, 用注入时钟, 不依赖真实 ticker)
+- 改 assist 门控 / 选源 / 检测循环后必须跑 `.\build.ps1 -Command test -Packages ./assist/...` (门控与选源都有单测, 用注入时钟, 不依赖真实 ticker)
+- **assist 的启用条件是 `len(inferenceSources) != 0`, 不是 `detectorEngine != nil`**: `-noyolo` 只去掉本地 YOLO, 远端 (`-stream` 收到手机结果 → `detector.RemoteSource`) 仍是有效源, 辅助必须照常工作。历史上 assist 的初始化被嵌在 `if detectorEngine != nil` 里, 导致 `-noyolo` 把瞄准吸附一起关掉 (启动日志不再出现 `aim assist configured`), 已修
+- 用 `-game` 之外的值跑 streamer 时 `foregroundGameLoop` 不会启动, `assistForegroundAllowed` 保持 false, `Tick` 在选源前就返回 — 此时 `assist_age_ms` 恒为 0 属正常, 不能用来判断 assist 是否建立
 - "检测变慢导致 assist 拽旧位置"看 `/metrics` 的 `detection_age_ms` / `detection_pipeline_ms` / `assist_gated`; 观察前先确认**只有一个 streamer 实例在跑**, 多个实例会抢 `:8080`, 读到的指标可能来自旧进程

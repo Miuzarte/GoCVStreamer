@@ -38,6 +38,19 @@ type RemoteResult struct {
 	FrameID     uint64            `json:"frame_id"`
 	Detections  []RemoteDetection `json:"detections"`
 	InferenceMs float64           `json:"inference_ms"`
+
+	// 以下为手机侧分段耗时 (ms), 老客户端不报时全部为 0 (退化为旧口径)
+	// CpuMs 为手机在 Execute 之外的全部 CPU 耗时 (解码/量化/后处理/marshal)
+	CpuMs    float64 `json:"cpu_ms,omitempty"`
+	DecodeMs float64 `json:"decode_ms,omitempty"`
+	QuantMs  float64 `json:"quant_ms,omitempty"`
+	PostMs   float64 `json:"post_ms,omitempty"`
+	// ReadMs 为手机等待下一帧的时间: 持续接近 0 说明手机侧已经饱和 (在排队)
+	ReadMs float64 `json:"read_ms,omitempty"`
+	// QueueMs 为手机内部流水线队列里等的时间 (不是网络; 串行客户端恒为 0)
+	QueueMs float64 `json:"queue_ms,omitempty"`
+	// FrameBytes 为收到的 JPEG 字节数: 内容变化会直接改变传输耗时, A/B 时用它做对照
+	FrameBytes int `json:"frame_bytes,omitempty"`
 }
 
 type Config struct {
@@ -46,6 +59,7 @@ type Config struct {
 	JpegQuality int    // JPEG 质量 1-100
 	InputSize   int    // 流帧边长 (正方形), 默认 640
 	CropSize    int    // 中心裁剪边长: -1=屏幕短边 (自动), 0=不裁剪, >0=固定值 (默认 1280)
+	Compress    bool   // 允许 permessage-deflate (传的是 JPEG, 压不动还白吃 CPU, 默认关)
 }
 
 type Stats struct {
@@ -57,6 +71,21 @@ type Stats struct {
 	LastAt        time.Time
 	LastLatency   time.Duration
 	LastInference time.Duration
+	LastCpu       time.Duration
+	LastDecode    time.Duration
+	LastQuant     time.Duration
+	LastPost      time.Duration
+	LastRead      time.Duration
+	LastQueue     time.Duration
+
+	// EMA (α=1/32, 30fps 下约 1s 窗口): 单帧瞬时值噪声可达 ±3ms (手机调频/画面内容),
+	// 只有平均值才适合做 A/B 比较
+	EmaInit      bool
+	AvgLatency   time.Duration
+	AvgInference time.Duration
+	AvgCpu       time.Duration
+	AvgQueue     time.Duration
+	AvgBytes     float64
 }
 
 type Server struct {
@@ -171,11 +200,16 @@ func (s *Server) Stats() Stats {
 
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	remote := r.RemoteAddr
-	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		// 与 goApp/flutterApp 客户端协商压缩; 手机 App 无 Origin 限制, 全部放行
-		CompressionMode: websocket.CompressionContextTakeover,
+	acceptOpts := &websocket.AcceptOptions{
+		// 关掉 permessage-deflate: 帧是 JPEG (不可压), 压缩率≈1 却要两端各跑一遍 deflate,
+		// 手机侧的解压还在接收热路径上。手机 App 无 Origin 限制, 全部放行
+		CompressionMode: websocket.CompressionDisabled,
 		OriginPatterns:  []string{"*"},
-	})
+	}
+	if s.cfg.Compress {
+		acceptOpts.CompressionMode = websocket.CompressionContextTakeover
+	}
+	c, err := websocket.Accept(w, r, acceptOpts)
 	if err != nil {
 		return
 	}
@@ -217,6 +251,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			latency = t
 		}
 		inference := time.Duration(res.InferenceMs * float64(time.Millisecond))
+		cpu := time.Duration(res.CpuMs * float64(time.Millisecond))
 
 		s.statsMu.Lock()
 		s.stats.Detections += uint64(len(res.Detections))
@@ -224,6 +259,13 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		s.stats.LastAt = time.Now()
 		s.stats.LastLatency = latency
 		s.stats.LastInference = inference
+		s.stats.LastCpu = cpu
+		s.stats.LastDecode = time.Duration(res.DecodeMs * float64(time.Millisecond))
+		s.stats.LastQuant = time.Duration(res.QuantMs * float64(time.Millisecond))
+		s.stats.LastPost = time.Duration(res.PostMs * float64(time.Millisecond))
+		s.stats.LastRead = time.Duration(res.ReadMs * float64(time.Millisecond))
+		s.stats.LastQueue = time.Duration(res.QueueMs * float64(time.Millisecond))
+		s.emaUpdateLocked(latency, inference, cpu, s.stats.LastQueue, float64(res.FrameBytes))
 		s.statsMu.Unlock()
 
 		if s.OnResult != nil {
@@ -363,6 +405,28 @@ func (s *Server) frameLatency(frameID uint32, now time.Time) (time.Duration, boo
 		return 0, false
 	}
 	return now.Sub(t), true
+}
+
+// emaUpdateLocked 维护分段耗时的指数移动平均 (α=1/32, 30fps 下约 1s 窗口)。
+// 单帧瞬时值噪声可达 ±3ms (手机调频/画面内容变化), 只有平均值才适合做 A/B 比较。
+// 调用方必须持有 statsMu。
+func (s *Server) emaUpdateLocked(latency, inference, cpu, queue time.Duration, frameBytes float64) {
+	const alpha = 1.0 / 32
+	st := &s.stats
+	if !st.EmaInit {
+		st.AvgLatency, st.AvgInference, st.AvgCpu = latency, inference, cpu
+		st.AvgQueue, st.AvgBytes = queue, frameBytes
+		st.EmaInit = true
+		return
+	}
+	blend := func(prev, cur time.Duration) time.Duration {
+		return time.Duration((1-alpha)*float64(prev) + alpha*float64(cur))
+	}
+	st.AvgLatency = blend(st.AvgLatency, latency)
+	st.AvgInference = blend(st.AvgInference, inference)
+	st.AvgCpu = blend(st.AvgCpu, cpu)
+	st.AvgQueue = blend(st.AvgQueue, queue)
+	st.AvgBytes = (1-alpha)*st.AvgBytes + alpha*frameBytes
 }
 
 // Transform 把归一化检测框转换回屏幕坐标 (裁剪前全屏坐标系)
