@@ -3,9 +3,7 @@ package capturer
 import (
 	"context"
 	"errors"
-	"fmt"
 	"image"
-	"image/color"
 	"runtime"
 	"sync"
 	"time"
@@ -19,6 +17,9 @@ import (
 type Config struct {
 	MinFps        int
 	DisableOpenCV bool
+	// MatchRoi 是模板匹配读取的兴趣区。灰度转换只对这块做, 不再整帧转换
+	// 零值 = 整帧 (退化为旧行为)
+	MatchRoi image.Rectangle
 }
 
 var imageToMatWarnOnce sync.Once
@@ -60,7 +61,10 @@ type Server struct {
 
 	noOpenCV bool
 
-	frameMatRGBAInter gocv.Mat
+	// matchRoi 是当前灰度化 + 模板匹配的兴趣区, roiRGBA 是它对应的 RGBA 中转 Mat
+	// 只对 ROI 做拷贝与色彩转换, 避免为 88x104 的窗口每帧搬整张 2560x1440
+	matchRoi image.Rectangle
+	roiRGBA  gocv.Mat
 
 	diagGetImage   *timing.Diag
 	diagImageToMat *timing.Diag
@@ -89,11 +93,41 @@ func NewServer(src Source, cfg Config, mode gocv.IMReadFlag, onFrame func()) *Se
 		diagGetImage:   timing.NewDiag("GetImage"),
 		diagImageToMat: timing.NewDiag("ImageToMat"),
 	}
+	s.matchRoi = clampRoi(cfg.MatchRoi, bounds)
 	if !cfg.DisableOpenCV {
 		s.frame.mat = gocv.NewMat()
-		s.frameMatRGBAInter = gocv.NewMatWithSize(bounds.Dy(), bounds.Dx(), gocv.MatTypeCV8UC4)
+		s.roiRGBA = gocv.NewMatWithSize(s.matchRoi.Dy(), s.matchRoi.Dx(), gocv.MatTypeCV8UC4)
 	}
 	return s
+}
+
+// clampRoi 把兴趣区夹到画面内; 空值或完全出界时退化为整帧
+func clampRoi(roi, bounds image.Rectangle) image.Rectangle {
+	if roi.Empty() {
+		return bounds
+	}
+	r := roi.Intersect(bounds)
+	if r.Empty() {
+		return bounds
+	}
+	return r
+}
+
+// SetMatchRoi 更新模板匹配的兴趣区并重建 ROI 缓冲 (快捷键调整 ROI 后调用)
+func (s *Server) SetMatchRoi(roi image.Rectangle) {
+	if s.noOpenCV {
+		return
+	}
+	r := clampRoi(roi, s.source.Bounds())
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if r == s.matchRoi {
+		return
+	}
+	s.matchRoi = r
+	s.roiRGBA.Close()
+	s.roiRGBA = gocv.NewMatWithSize(r.Dy(), r.Dx(), gocv.MatTypeCV8UC4)
 }
 
 func (s *Server) Bounds() image.Rectangle {
@@ -292,8 +326,9 @@ func (s *Server) reallocBuffers(rawRGBA **image.RGBA) {
 	*rawRGBA = image.NewRGBA(bounds)
 	s.screenRGBA = image.NewRGBA(bounds)
 	if !s.noOpenCV {
-		s.frameMatRGBAInter.Close()
-		s.frameMatRGBAInter = gocv.NewMatWithSize(bounds.Dy(), bounds.Dx(), gocv.MatTypeCV8UC4)
+		s.matchRoi = clampRoi(s.cfg.MatchRoi, bounds)
+		s.roiRGBA.Close()
+		s.roiRGBA = gocv.NewMatWithSize(s.matchRoi.Dy(), s.matchRoi.Dx(), gocv.MatTypeCV8UC4)
 	}
 	log.Info().
 		Int("width", bounds.Dx()).
@@ -304,65 +339,62 @@ func (s *Server) reallocBuffers(rawRGBA **image.RGBA) {
 func (s *Server) Close() error {
 	if !s.noOpenCV {
 		s.frame.mat.Close()
-		s.frameMatRGBAInter.Close()
+		s.roiRGBA.Close()
 	}
 	return s.source.Close()
 }
 
+// imageToMat 把 MatchRoi 区域转成灰度 (或 BGR) 写进 dst
+//
+// 只处理 ROI: 模板匹配只读这一小块 (默认 88x104), 原来却对整张 2560x1440 做
+// 14.7MB 拷贝 + CvtColor, 每帧白搬约 33MB
 func (s *Server) imageToMat(img image.Image, dst *gocv.Mat) (err error) {
-	var src gocv.Mat
+	roi := s.matchRoi
 
-	bounds := img.Bounds()
-	x := bounds.Dx()
-	y := bounds.Dy()
-
-	switch img.ColorModel() {
-	case color.RGBAModel:
-		m, res := img.(*image.RGBA)
-		if true != res {
-			return fmt.Errorf("image color format error")
-		}
-		data, err := s.frameMatRGBAInter.DataPtrUint8()
+	if m, ok := img.(*image.RGBA); ok {
+		data, err := s.roiRGBA.DataPtrUint8()
 		if err != nil {
 			return err
 		}
-		copy(data, m.Pix)
-		return gocv.CvtColor(s.frameMatRGBAInter, dst, s.cvtCode)
-
-	default:
-		imageToMatWarnOnce.Do(func() {
-			log.Warn().Msg("unexpected image color model, conversion performance may be affected")
-		})
-		if s.cvtCode == gocv.ColorRGBAToGray {
-			data := make([]byte, 0, x*y)
-			for j := bounds.Min.Y; j < bounds.Max.Y; j++ {
-				for i := bounds.Min.X; i < bounds.Max.X; i++ {
-					r, g, b, _ := img.At(i, j).RGBA()
-					gray := byte((19595*uint32(r) + 38470*uint32(g) + 7471*uint32(b)) >> 16)
-					data = append(data, gray)
-				}
-			}
-			src, err = gocv.NewMatFromBytes(y, x, gocv.MatTypeCV8UC1, data)
-			if err != nil {
-				return err
-			}
-			defer src.Close()
-			src.CopyTo(dst)
-			return nil
+		rowBytes := roi.Dx() * 4
+		for y := range roi.Dy() {
+			srcOff := m.PixOffset(roi.Min.X, roi.Min.Y+y)
+			copy(data[y*rowBytes:(y+1)*rowBytes], m.Pix[srcOff:srcOff+rowBytes])
 		}
-		data := make([]byte, 0, x*y*3)
-		for j := bounds.Min.Y; j < bounds.Max.Y; j++ {
-			for i := bounds.Min.X; i < bounds.Max.X; i++ {
-				r, g, b, _ := img.At(i, j).RGBA()
-				data = append(data, byte(b>>8), byte(g>>8), byte(r>>8))
-			}
-		}
-		src, err = gocv.NewMatFromBytes(y, x, gocv.MatTypeCV8UC3, data)
-		if err != nil {
-			return err
-		}
-		defer src.Close()
-		src.CopyTo(dst)
-		return nil
+		return gocv.CvtColor(s.roiRGBA, dst, s.cvtCode)
 	}
+
+	imageToMatWarnOnce.Do(func() {
+		log.Warn().Msg("unexpected image color model, conversion performance may be affected")
+	})
+
+	gray := s.cvtCode == gocv.ColorRGBAToGray
+	channels := 3
+	if gray {
+		channels = 1
+	}
+
+	data := make([]byte, 0, roi.Dx()*roi.Dy()*channels)
+	for j := roi.Min.Y; j < roi.Max.Y; j++ {
+		for i := roi.Min.X; i < roi.Max.X; i++ {
+			r, g, b, _ := img.At(i, j).RGBA()
+			if gray {
+				data = append(data, byte((19595*uint32(r)+38470*uint32(g)+7471*uint32(b))>>16))
+				continue
+			}
+			data = append(data, byte(b>>8), byte(g>>8), byte(r>>8))
+		}
+	}
+
+	mt := gocv.MatTypeCV8UC3
+	if gray {
+		mt = gocv.MatTypeCV8UC1
+	}
+	src, err := gocv.NewMatFromBytes(roi.Dy(), roi.Dx(), mt, data)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	src.CopyTo(dst)
+	return nil
 }

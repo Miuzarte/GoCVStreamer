@@ -228,7 +228,12 @@ func (e *Engine) Run(ctx context.Context) {
 			continue
 		}
 
+		// frameMat 已经是 MatchRoi 大小的灰度图 (capturer 只对 ROI 做转换),
+		// 这里再拷一份快照即可, 不再整帧 CopyTo + Region
 		frameMat := e.capturerServer.ReadMat()
+		if frameMat.Empty() {
+			continue
+		}
 		frameMat.CopyTo(&capture)
 
 		e.mu.RLock()
@@ -238,7 +243,6 @@ func (e *Engine) Run(ctx context.Context) {
 			continue
 		}
 
-		captureRoi := capture.Region(roi)
 		tStart := time.Now()
 
 		slotFilter := w.SLOT_UNDEFINED
@@ -248,11 +252,10 @@ func (e *Engine) Run(ctx context.Context) {
 		}
 		e.mu.RUnlock()
 
-		idx, matched, found := e.matchWeapon(captureRoi, slotFilter)
+		idx, matched, found := e.matchWeapon(capture, slotFilter)
 		e.stats.Cost = time.Since(tStart)
 		e.diag.Observe(time.Since(tStart), log)
 		e.stats.Matched = matched
-		captureRoi.Close()
 
 		e.stats.Fps, _ = e.fpsCounter.Count()
 

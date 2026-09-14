@@ -15,3 +15,6 @@ config.ini
 *.dll
 
 docs/
+
+# benchmark 临时产物 (测量脚本/日志/profile/报告)
+.bench/

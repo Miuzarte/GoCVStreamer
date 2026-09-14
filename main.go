@@ -54,6 +54,7 @@ var (
 	nogui       = flag.Bool("nogui", false, "run without GUI window")
 	httpPort    = flag.String("port", ":8080", "HTTP metrics server port")
 	nohttp      = flag.Bool("nohttp", false, "disable HTTP metrics server")
+	pprofAddr   = flag.String("pprof", "", "expose net/http/pprof on this address (e.g. 127.0.0.1:6060, empty = disabled)")
 	noyolo      = flag.Bool("noyolo", false, "disable YOLO person detection")
 	autodisplay = flag.Bool("autodisplay", false, "skip display selection, auto-select largest")
 	noopencv    = flag.Bool("noopencv", false, "disable OpenCV template matching")
@@ -65,8 +66,8 @@ var (
 	obsHeight   = flag.Int("obsheight", 0, "OBS Virtual Camera height (0=default)")
 
 	streamAddr    = flag.String("stream", ":9090", "WebSocket stream server address (empty to disable)")
-	streamFps     = flag.Int("streamfps", 30, "WebSocket stream target FPS")
-	streamQuality = flag.Int("streamquality", 80, "WebSocket stream JPEG quality (1-100)")
+	streamFps     = flag.Int("streamfps", 60, "WebSocket stream target FPS")
+	streamQuality = flag.Int("streamquality", 90, "WebSocket stream JPEG quality (1-100)")
 	streamCrop    = flag.Int("streamcrop", 1280, "WebSocket stream center crop size (-1=screen short edge, 0=no crop)")
 	nosender      = flag.Bool("nosender", false, "disable WebSocket stream server")
 	streamTtl     = flag.Int("streamttl", 500, "remote results TTL in ms (0 disables remote results)")
@@ -79,6 +80,8 @@ var (
 	assistMaxAge = flag.Duration("assist-max-age", 0, "aim assist: ignore detection results older than this (0 = auto = 1/target detect FPS, 33ms at 30fps)")
 
 	gpuPriority = flag.String("gpu-priority", "high", "this process GPU scheduling priority class: idle|below|normal|above|high|realtime (normal = don't touch, needs HAGS)")
+
+	opencvThreads = flag.Int("opencv-threads", 1, "OpenCV 内部线程数 (1 = 关掉 OpenCV 线程池; 实测总 CPU 降约 36% 且各算子耗时不退化; 0 = 用 OpenCV 默认)")
 
 	targetTimeout = flag.Duration("target-timeout", 30*time.Minute, "exit when the target game process (-game) is not detected for this long (0 disables)")
 
@@ -193,6 +196,18 @@ func init() {
 
 	var err error
 
+	// OpenCV 的 pthreads 线程池在本项目的工作负载 (小 ROI 模板匹配 + 整帧色彩转换) 上
+	// 只增加总 CPU 不缩短耗时: 池里 11 个 worker 的唤醒/自旋开销约 0.4~0.5 核, 而
+	// cvtColor/matchTemplate 的墙钟耗时基本不变。默认关掉它。
+	if *opencvThreads > 0 {
+		previous := gocv.GetNumThreads()
+		gocv.SetNumThreads(*opencvThreads)
+		log.Info().
+			Int("threads", *opencvThreads).
+			Int("previous", previous).
+			Msg("opencv thread count set")
+	}
+
 	err = windows.SetPriorityClass(windows.CurrentProcess(), windows.HIGH_PRIORITY_CLASS)
 	if err != nil {
 		log.Warn().Err(err).Msg("failed to set process priority")
@@ -275,11 +290,14 @@ func selectDisplay() {
 	cfg := capturer.Config{
 		MinFps:        1,
 		DisableOpenCV: *noopencv,
+		MatchRoi:      roiRect,
 	}
 	capturerServer = capturer.NewServer(src, cfg, MATCHING_MODE, func() {
 		if window != nil && !*nogui {
 			window.SetBounds(capturerServer.Bounds().Max)
-			window.App().Invalidate()
+			// 走 ui.Window.Invalidate 而不是 window.App().Invalidate():
+			// 前者在窗口失焦/最小化时会丢掉这次请求, 也就不会产生 FrameEvent
+			window.Invalidate()
 		}
 	})
 }
@@ -437,6 +455,12 @@ func main() {
 		})
 	}
 
+	if *pprofAddr != "" {
+		cwg.Go(func(ctx context.Context) {
+			startPprofServer(ctx, *pprofAddr)
+		})
+	}
+
 	if *streamAddr != "" && !*nosender {
 		streamServer = sender.NewServer(sender.Config{
 			Addr:        *streamAddr,
@@ -523,7 +547,7 @@ func main() {
 			assistCfg := assist.DefaultConfig()
 			switch *game {
 			case "r6s":
-				assistCfg.Speed = 6
+				assistCfg.Speed = 8
 				assistCfg.InnerRatio = 0.5
 				assistCfg.RequireKeys = []keystate.KeyCode{
 					keystate.VK_RBUTTON,
@@ -561,6 +585,7 @@ func main() {
 			Title:   windowTitle,
 			MinSize: image.Pt(1280, 720),
 			Size:    image.Pt(1280, 720),
+			OnHWND:  onWindowHWND,
 		})
 		window.SetShortcuts(createShortcuts(window.App()))
 		window.Register(&metricsDrawer{
@@ -627,7 +652,10 @@ func main() {
 					return
 				default:
 				}
-				window.SetScreenImage(capturerServer.ReadScreen())
+				// 暂停渲染时连这 60Hz 的取屏也停掉: 反正没人会画它
+				if !window.Hidden() {
+					window.SetScreenImage(capturerServer.ReadScreen())
+				}
 				time.Sleep(time.Second / 60)
 			}
 		})
@@ -1085,6 +1113,17 @@ type metricsDrawer struct {
 }
 
 func (d *metricsDrawer) Draw(gtx layout.Context, s ui.DScale) {
+	// 窗口在后台时整段跳过。这一帧里最贵的两笔都在这里:
+	//   snapshotMetrics() + 7 次 Fprintf 拼字符串 —— 每帧重新格式化一遍统计信息
+	//   ui.DrawList 里 widget.Label 对整段多行文本做 shape/layout(唯一调用点就是本函数末尾)
+	//
+	// ui.Window.Run 在暂停时已经跳过整条绘制链, 所以正常路径下这里不会被调到;
+	// 这道早退是为了把"暂停"就地写在花 CPU 的地方, 以后就算别处又产生了一帧,
+	// 也不必重新付格式化与排版的钱。
+	if window != nil && window.Hidden() {
+		return
+	}
+
 	m := snapshotMetrics()
 
 	var sb strings.Builder
@@ -1101,8 +1140,8 @@ func (d *metricsDrawer) Draw(gtx layout.Context, s ui.DScale) {
 			fmt.Fprintf(&sb, " | Local: %.1fms", m.DetectionCostMs)
 		}
 		if m.StreamFresh {
-			fmt.Fprintf(&sb, " | Remote: net %.1fms + cpu %.1fms + inf %.1fms (%.0fKB)",
-				m.StreamNetworkAvgMs, m.StreamCpuAvgMs, m.StreamInferenceAvgMs, m.StreamFrameBytes/1024)
+			fmt.Fprintf(&sb, " | Remote: %.1fms (net %.1fms | cpu %.1fms | inf %.1fms)",
+				m.StreamLatencyAvgMs, m.StreamNetworkAvgMs, m.StreamCpuAvgMs, m.StreamInferenceAvgMs)
 		}
 		sb.WriteString(" |")
 		sb.WriteByte('\n')
@@ -1170,11 +1209,14 @@ func createShortcuts(receiver any) widgets.Shortcuts {
 
 		widgets.NewShortcut("P", "p").
 			Do(func(_ key.Name, _ key.Modifiers) {
-				windowHandel = windows.GetForegroundWindow()
+				// 注意别写进 windowHandel: 那个变量现在专门存本进程自己的窗口句柄,
+				// WDA 相关操作依赖它, 覆盖掉会让热键作用到别人的窗口上
+				fg := windows.GetForegroundWindow()
 				log.Info().
 					Int("parentProcessId", parentProcessId).
 					Int("processId", processId).
-					Uint64("windowHandel", uint64(windowHandel)).
+					Uint64("foregroundWindow", uint64(fg)).
+					Uint64("ownWindow", uint64(window.HWND())).
 					Msg("process/window info")
 			}),
 
@@ -1258,13 +1300,43 @@ func moveROI(name key.Name, mod key.Modifiers) {
 	boundaryCheck(capturerServer.Bounds(), &newRect)
 	roiRect = newRect
 	matcherEngine.SetRoi(newRect)
+	// 灰度转换只做 ROI, 所以采集侧也要跟着换缓冲
+	capturerServer.SetMatchRoi(newRect)
 	showPosTill = time.Now().Add(time.Second * 3)
 	log.Debug().Any("roiRect", roiRect).Msg("roiRect moved")
 }
 
+// onWindowHWND 在 Gio 建好窗口、句柄可用的那一刻被调用 (ui.Config.OnHWND)。
+//
+// 立刻把窗口设成"截图时不可见": 采集整屏时, 否则会把自己的画面拍进去 —— 镜像里套
+// 镜像, 而且叠加的检测框会被喂回推理链路。
+//
+// 句柄必须来自这里而不是 GetForegroundWindow: SetWindowDisplayAffinity 只对
+// **本进程**的窗口有效, 猜错时它返回失败, 表现成"这个功能时灵时不灵"。
+func onWindowHWND(hwnd uintptr) {
+	windowHandel = windows.HWND(hwnd)
+	if windowHandel == 0 {
+		log.Warn().Msg("window handle invalidated, display affinity left unchanged")
+		return
+	}
+	if err := SetWindowDisplayAffinity(windowHandel, WDA_EXCLUDEFROMCAPTURE); err != nil {
+		// WDA_EXCLUDEFROMCAPTURE 要 Windows 10 2004+; 老系统只认 WDA_MONITOR,
+		// 那个的效果是"窗口在截图里变成黑块"。降级也要说清楚用的是哪个。
+		log.Warn().Err(err).Msg("WDA_EXCLUDEFROMCAPTURE failed, falling back to WDA_MONITOR")
+		if err2 := SetWindowDisplayAffinity(windowHandel, WDA_MONITOR); err2 != nil {
+			log.Error().Err(err2).Msg("failed to set window display affinity")
+			return
+		}
+		log.Info().Msg("window display affinity = WDA_MONITOR")
+		return
+	}
+	log.Info().Msg("window display affinity = WDA_EXCLUDEFROMCAPTURE")
+}
+
 func toggleWDA(mod key.Modifiers) {
 	if windowHandel == 0 {
-		windowHandel = windows.GetForegroundWindow()
+		log.Warn().Msg("own window handle not available, WDA toggle ignored")
+		return
 	}
 
 	currWda, err := GetWindowDisplayAffinity(windowHandel)
@@ -1284,7 +1356,7 @@ func toggleWDA(mod key.Modifiers) {
 			log.Info().Msg("wda set to WDA_MONITOR")
 		}
 		err = SetWindowDisplayAffinity(windowHandel, toWda)
-	case WDA_EXCLUDEFROMCAPTURE:
+	case WDA_EXCLUDEFROMCAPTURE, WDA_MONITOR:
 		log.Info().Msg("wda set to WDA_NONE")
 		err = SetWindowDisplayAffinity(windowHandel, WDA_NONE)
 	}

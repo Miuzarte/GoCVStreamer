@@ -41,7 +41,7 @@ Write-Host "  OpenCV Lib: $OpenCVLib"
 
 # $compiler = "`"B:/Program Files/Microsoft Visual Studio/2022/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/cl.exe`""
 
-$OpenCV_VERSION = 4120
+$OpenCV_VERSION = 4130
 $OpenCV_LDFLAGS = `
     # "-lstdc++ " + `
     "-lopencv_stereo$OpenCV_VERSION " + `

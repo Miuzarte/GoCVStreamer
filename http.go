@@ -5,6 +5,7 @@ import (
 	"encoding/json/jsontext"
 	jsonv2 "encoding/json/v2"
 	"net/http"
+	"net/http/pprof"
 	"runtime/debug"
 	"time"
 )
@@ -66,6 +67,9 @@ type MetricsSnapshot struct {
 	Cpu       float64 `json:"cpu"`
 	Debugging bool    `json:"debugging"`
 
+	// UiHidden 为 true 表示窗口失焦/最小化, UI 已暂停渲染
+	UiHidden bool `json:"ui_hidden"`
+
 	GcCount      int     `json:"gc_count"`
 	GcPauseAvgUs float64 `json:"gc_pause_avg_us"`
 	GcSinceLastS float64 `json:"gc_since_last_s"`
@@ -76,6 +80,12 @@ var lastGCStats debug.GCStats
 func snapshotMetrics() (m MetricsSnapshot) {
 	const ms = float64(time.Millisecond)
 	const us = float64(time.Microsecond)
+
+	// 窗口失焦/最小化时 UI 会暂停渲染 (见 ui.Window)。暴露出来是为了能在
+	// /metrics 上把"暂停中"和"渲染中"的 CPU 分开看, 而不是靠猜。
+	if window != nil {
+		m.UiHidden = window.Hidden()
+	}
 
 	if capturerServer != nil {
 		s := capturerServer.Stats()
@@ -210,6 +220,31 @@ func startHttpServer(ctx context.Context, addr string) {
 		log.Info().Str("addr", addr).Msg("HTTP server started")
 		if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 			log.Warn().Err(err).Msg("HTTP server error")
+		}
+	}()
+}
+
+// startPprofServer 在独立端口暴露 net/http/pprof (只在 -pprof 非空时启动)
+// 用显式 mux 而不是导入 net/http/pprof 的 DefaultServeMux 副作用, 避免污染 metrics 端口
+func startPprofServer(ctx context.Context, addr string) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /debug/pprof/", pprof.Index)
+	mux.HandleFunc("GET /debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("GET /debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("GET /debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("GET /debug/pprof/trace", pprof.Trace)
+
+	srv := &http.Server{Addr: addr, Handler: mux}
+
+	go func() {
+		<-ctx.Done()
+		srv.Shutdown(context.Background())
+	}()
+
+	go func() {
+		log.Info().Str("addr", addr).Msg("pprof server started")
+		if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+			log.Warn().Err(err).Msg("pprof server error")
 		}
 	}()
 }

@@ -8,6 +8,7 @@ require (
 	github.com/ebitengine/purego v0.10.2
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/getcharzp/go-vision v0.0.0-20260213095537-94f2a346b769
+	github.com/getcharzp/onnxruntime_purego v1.24.0
 	github.com/kbinani/screenshot v0.0.0-20250624051815-089614a94018
 	github.com/kirides/go-d3d v1.0.1
 	github.com/rs/zerolog v1.35.1
@@ -19,7 +20,6 @@ require (
 require (
 	gioui.org/shader v1.0.8 // indirect
 	github.com/gen2brain/shm v0.2.2 // indirect
-	github.com/getcharzp/onnxruntime_purego v1.24.0 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/go-text/typesetting v0.3.4 // indirect
 	github.com/godbus/dbus/v5 v5.2.2 // indirect

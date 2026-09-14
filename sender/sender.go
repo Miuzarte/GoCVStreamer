@@ -1,14 +1,12 @@
 package sender
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	jsonv2 "encoding/json/v2"
 	"fmt"
 	"image"
 	"image/draw"
-	"image/jpeg"
 	"net/http"
 	"sync"
 	"time"
@@ -18,6 +16,7 @@ import (
 	"github.com/Miuzarte/GoCVStreamer/libyuv"
 	"github.com/Miuzarte/GoCVStreamer/logger"
 	"github.com/coder/websocket"
+	"gocv.io/x/gocv"
 )
 
 var log = logger.New("Sender")
@@ -115,10 +114,10 @@ type Server struct {
 
 func NewServer(cfg Config, src *capturer.Server) *Server {
 	if cfg.Fps <= 0 {
-		cfg.Fps = 30
+		cfg.Fps = 60
 	}
 	if cfg.JpegQuality <= 0 || cfg.JpegQuality > 100 {
-		cfg.JpegQuality = 80
+		cfg.JpegQuality = 90
 	}
 	if cfg.InputSize <= 0 {
 		cfg.InputSize = 640
@@ -301,7 +300,23 @@ func (s *Server) runLoop(ctx context.Context) {
 		Msg("stream frame geometry ready")
 
 	cropImg := image.NewRGBA(image.Rect(0, 0, s.cropSize, s.cropSize))
-	resizeDst := image.NewRGBA(image.Rect(0, 0, s.cfg.InputSize, s.cfg.InputSize))
+
+	// 复用的编码缓冲: Mat 承载缩放后的 BGRA 帧, jpegBuf 承载 JPEG 输出。
+	// 注意 gocv.Mat 的零值 (p == nil) 调 Empty()/Close() 会崩, 所以必须显式构造
+	size := s.cfg.InputSize
+	streamMat := gocv.NewMatWithSize(size, size, gocv.MatTypeCV8UC4)
+	defer streamMat.Close()
+	streamPix, err := streamMat.DataPtrUint8()
+	if err != nil {
+		log.Error().Err(err).Msg("stream: jpeg mat data ptr failed")
+		return
+	}
+	streamDst := &image.RGBA{
+		Pix:    streamPix,
+		Stride: size * 4,
+		Rect:   image.Rect(0, 0, size, size),
+	}
+	var jpegBuf []byte
 
 	interval := time.Second / time.Duration(s.cfg.Fps)
 	ticker := time.NewTicker(interval)
@@ -322,33 +337,46 @@ func (s *Server) runLoop(ctx context.Context) {
 		// 有客户端时把捕获帧率抬到推流帧率 (3 秒窗口, 每 tick 续期)
 		s.src.RaiseCeiling(s.cfg.Fps)
 
-		id := s.src.ReadFrameId()
-		if id == 0 || id == s.lastSent {
+		rgba, id, _ := s.src.ReadFrame()
+		if rgba == nil || id == 0 || id == s.lastSent {
 			continue
 		}
 
-		rgba := s.src.CloneRgba()
-		if rgba == nil {
-			continue
-		}
-
-		var frame image.Image = rgba
+		// 需要裁剪时直接把中心区域拷进复用缓冲, 不必先深拷贝整帧 (原来每帧多分配并拷贝 14.7MB)
+		// 缩放已经不改写源数据 (见 libyuv.ResizeRGBAInto), 所以不裁剪时可以直接读采集帧
+		frame := rgba
 		if s.cropNeeded {
 			draw.Draw(cropImg, cropImg.Bounds(), rgba, s.cropOffset, draw.Src)
 			frame = cropImg
 		}
 
-		libyuv.ResizeRGBAInto(resizeDst, frame.(*image.RGBA), s.cfg.InputSize, s.cfg.InputSize)
-
-		var buf bytes.Buffer
-		if err := jpeg.Encode(&buf, resizeDst, &jpeg.Options{Quality: s.cfg.JpegQuality}); err != nil {
+		var err error
+		jpegBuf, err = s.encodeJPEG(streamMat, streamDst, frame, jpegBuf)
+		if err != nil {
 			log.Warn().Err(err).Msg("stream: jpeg encode failed")
 			continue
 		}
 
 		s.lastSent = id
-		s.Broadcast(uint32(id), buf.Bytes())
+		s.Broadcast(uint32(id), jpegBuf)
 	}
+}
+
+// encodeJPEG 把 src 缩放成 InputSize 见方的 BGRA 直接写进 streamMat, 再用 OpenCV 内置的
+// libjpeg-turbo 编码 (实测 CPU 约为 Go 标准库 image/jpeg 的一半, 产物字节数与像素误差一致)
+//
+// 缩放直接落在 Mat 的内存上, 因此没有额外的中间拷贝; libyuv 的 ARGB 目标字节序
+// 正好是 OpenCV 的 BGRA, 所以也不需要换通道
+func (s *Server) encodeJPEG(streamMat gocv.Mat, streamDst *image.RGBA, src *image.RGBA, buf []byte) ([]byte, error) {
+	libyuv.ResizeBGRAInto(streamDst, src, s.cfg.InputSize, s.cfg.InputSize)
+
+	encoded, err := gocv.IMEncodeWithParams(gocv.JPEGFileExt, streamMat, []int{gocv.IMWriteJpegQuality, s.cfg.JpegQuality})
+	if err != nil {
+		return buf, fmt.Errorf("imencode: %w", err)
+	}
+	defer encoded.Close()
+
+	return append(buf[:0], encoded.GetBytes()...), nil
 }
 
 // Broadcast 按协议发送 [4B frame_id LE][JPEG]

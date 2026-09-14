@@ -73,7 +73,21 @@ logi-hidpp (HID++ 协议) ← mhub-logi (设备扩展) ← mhub-go (脚本运行
 ```
 
 环境要点 (build.ps1 内部设置, 直接 go build 会因缺 OpenCV 头文件失败):
-- OpenCV: `B:/Lib/opencv_build/install`, 49 个库, CGO_LDFLAGS 逐个 `-lopencv_<name>4120`
+- OpenCV: `B:/Lib/opencv_build/install`, 50 个库, CGO_LDFLAGS 逐个 `-lopencv_<name>4130`
+  (导入库实际叫 `libopencv_<name>4130.dll.a`);换 OpenCV 版本只需改 `build.ps1:44` 的 `$OpenCV_VERSION`
+- OpenCV 是 **4.13.0 + contrib**(2026-09-14 从 4.12.0 升级),构建要点见
+  `B:\Lib\opencv_build\OPENCV-4.13-REBUILD-REQUIREMENTS.md`:
+  - **必须开 NASM**,否则 libjpeg-turbo 退化成标量版 —— 实测 JPEG 编码差 **3.5 倍**
+    (sender 真实路径 4.43 → 1.25 ms/帧)
+  - **必须设 `CPU_DISPATCH=AVX,AVX2,FMA3`**(原 4.12 构建里是空的,整个 OpenCV 只跑 SSE4.2)
+  - **必须关 `WITH_PROTOBUF`/`BUILD_PROTOBUF`**(GCC 7.3 编不过 4.13 自带的 protobuf)
+  - **必须带 `-static-libgcc -static-libstdc++`**(四个 `CMAKE_*_FLAGS` 变量),否则 OpenCV DLL
+    会动态依赖 libstdc++,install 目录不再自包含
+  - 副作用:4.13 构建时找到了 `B:\Software\OpenBLAS`,于是 `libopencv_core4130.dll` 多了一个
+    `libopenblas.dll` 运行时依赖(4.12 没有)。本项目不用任何 LAPACK 相关算子
+    (`solve`/`SVD`/`calib3d`),无功能影响;要恢复严格等价用 `-DWITH_LAPACK=OFF` 重建
+  - **streamer.exe 自己就依赖 `libstdc++-6.dll` / `libgcc_s_seh-1.dll`**(gocv 的 cgo 垫片),
+    所以 `B:\Software\mingw64\bin` 必须在 PATH 上,与 OpenCV 怎么编无关
 - `CGO_ENABLED=1`, `CGO_CPPFLAGS=-I.../include`, `CGO_CXXFLAGS=--std=c++11 -DNDEBUG`
 - `GOEXPERIMENT=nodwarf5`
 - 需要 `wgc_helper.dll` 与 `streamer.exe` 同目录 (缺失时 WGC 回退 DXGI)
@@ -97,6 +111,8 @@ logi-hidpp (HID++ 协议) ← mhub-logi (设备扩展) ← mhub-go (脚本运行
 -mhub-script RainbowSix   武器状态注入的目标 mhub 脚本名 (空=mhub primary 脚本)
 -target-timeout 30m      目标游戏进程 (-game) 连续未检测到该时长则退出自身; 0=禁用
 -gpu-priority <类>       本进程 GPU 调度优先级 idle|below|normal|above|high|realtime (默认 high, normal=不改动)
+-opencv-threads <n>      OpenCV 内部线程数 (默认 1 = 关掉 OpenCV 线程池; 0 = 用 OpenCV 默认)
+-pprof <addr>            在独立端口暴露 net/http/pprof (默认空 = 关, 如 127.0.0.1:6060)
 -assist-max-age <时长>   瞄准辅助一个结果最多驱动多久的注入 (0=自动=1/检测目标FPS, 30FPS 下 33ms)
 -trt-plugin <path>       TensorRT RTX EP 插件 DLL (默认 $TENSOR_RT_EP_ABI_PATH, 再退回内置 0.4.1 路径)
 -trt-async-alloc         回到 EP 默认的 cudaMallocAsync 异步显存池 (A/B 对照用)
@@ -341,6 +357,51 @@ go run ./cmd/yolobench -device-io                  # 零拷贝设备张量
 - 实测 (2560x1440 采集 + 1280 中心裁剪 + `-noopencv`, 单实例, 无游戏): `detection_pipeline_ms` 由 15~38ms 降到 9~16ms (均值约 12ms), 检测率仍是 29.8~30fps, `detection_age_ms` 14~46ms (锯齿: 最小 = pipeline, 最大 = pipeline + 检测周期)
 
 排查"检测被 GPU 抢占"按这个次序看: `capture_fps` 是否掉 (采集侧) → `detection_pipeline_ms` 与 `detection_cost_ms` 的差值 (排队等待 vs kernel) → `detection_age_ms` 是否超过门控上限。
+
+## CPU 占用与帧准备 (2026-09-14 归因测量)
+
+目标配置 (远程推理, `-noyolo`: 采集 + 模板匹配 + JPEG 推流) 配对 A/B:
+改动前 1.07~1.20 核 (8.9~10.0% of 12T) → 管线优化后 0.309 核 (2.57%)
+→ **换 OpenCV 4.13 后 0.18~0.22 核 (1.5~1.9%)**,累计 **-81%~-83%**。
+改动前那个二进制在机器更忙时反而更贵 (OpenCV 线程池争抢下自旋更凶), 改动后与负载无关。
+
+- **OpenCV 线程池在本项目负载上是纯开销**: 池里 worker 的唤醒/自旋约 0.4~0.5 核, 而
+  `cvtColor` / `matchTemplate` 的墙钟耗时几乎不变 (线程数 1/2/4/8/12 对应
+  0.541/0.552/0.609/0.730/0.973 核, `match_cost_ms` 无趋势)。默认 `-opencv-threads 1`
+  注意 MinGW 版 OpenCV 用的是自有 pthreads 池 (依赖 `libwinpthread-1.dll`), `GOMP_SPINCOUNT` 无效
+- **只对 ROI 做灰度转换**: `capturer.Config.MatchRoi` (main 传 `roiRect`) 决定灰度化区域,
+  `matcher` 直接拿到 ROI 大小的灰度 Mat, 不再整帧 `CvtColor` + `CopyTo` + `Region`。
+  改 ROI 的快捷键路径必须同时调 `capturerServer.SetMatchRoi`, 否则缓冲尺寸对不上
+- **sender 不再每帧 `CloneRgba`**: 有裁剪时直接把中心区域 `draw.Draw` 进复用缓冲, 无裁剪时直接读采集帧
+- **`libyuv` 缩放不改写源, 也不做字节换序**: `ARGBScale` 对四个字节通道用同一组权重, 与
+  "交换字节 0/2" 可交换 (已用 `TestScaleCommutesWithChannelSwap` 在 1280x1280 随机图上逐字节验证),
+  所以 `ResizeRGBAInto` 就是一次 `argbScale`, 不必再 `ABGRToARGB` 预换序 + `ARGBToABGR` 还原。
+  **旧实现会原地改写 src** (注释曾要求调用方自己保证 src 是独立副本), 这个坑已经去掉;
+  `ResizeBGRAInto` 只在缩小后的目标上换序, 产出 OpenCV 要的 BGRA
+- **JPEG 走 OpenCV 内置的 libjpeg-turbo**: `gocv.IMEncodeWithParams` + `libyuv.ResizeBGRAInto`。
+  4.12 那版 OpenCV 是**标量版** (构建缺 NASM), 升级到 4.13 (带 SIMD) 后
+  sender 真实路径从 4.43 ms/帧 降到 **1.25 ms/帧 (3.5x)**, 产物字节数与像素误差完全一致。
+  Go 标准库 `image/jpeg` 是 5.7 ms/帧, 现在差 4.6 倍。
+  **这两次构建的差别就是 NASM** —— 见 `B:\Lib\opencv_build\OPENCV-4.13-REBUILD-REQUIREMENTS.md`
+- **AVX2 dispatch 没有让 `matchTemplate` 变快**: 同机同代码, `match_cost_ms` 4.12 实测 20.5~25.0,
+  4.13 实测 20.0~24.0 —— 落在同一区间, 看不出改善 (早先一次跑出 23.5~24.0 属噪声, 已用 4 次
+  重复测量推翻)。这印证了下面那条: 匹配开销是**真实计算量**(115 个模板 x 200µs), 不是缺 SIMD。
+  另: gocv v0.43.0 没暴露 `cv::setUseOptimized`, 想单独量化 dispatch 的贡献得自己加 cgo
+- **模板匹配本身约 0.1 核**: 115 个模板 x 单次 `Template.Match` 200µs
+  (模板只有约 66x18, ROI 却是 88x104, 纵向白搜约 5 倍候选位置) = 21.8ms/轮 @5fps。
+  这是真实计算不是调用开销。缩小 ROI 高度 / 粗筛早退 / 换匹配方法都能降, 但都会改变识别行为,
+  不要擅自改 (诊断见 `matcher/match_bench_test.go`)
+- **不要用零值 `gocv.Mat`**: `var m gocv.Mat` 的 `p` 是 nil, `Empty()` / `Close()` / 作为
+  `CvtColor` 的目标都会直接崩; 必须 `gocv.NewMat()` / `gocv.NewMatWithSize()`
+
+采集只占其中 8~9%, **单为省它做 OBS 集成不划算** (共享纹理回读的代价会把它吃回去)。
+OBS 那条路的真正价值是把裁剪/缩放/色彩转换搬到 GPU 只回读小缓冲, 设计见
+`.bench/CPU-归因报告.md` 第 10 节
+
+测量口径: `GetProcessTimes` 的 (user + kernel) 增量 / 墙钟 = 核数。
+**Windows 上 Go 的 CPU profile 会把阻塞在 cgo/系统调用里的线程也算成样本** (阻塞的
+`GetMessage`、GPU 推理等待都会计入, `Total samples` 甚至报出超过 100% 的单核占用),
+所以函数级归因只能看相对分布, 绝对量必须用进程 CPU 时间。复现脚本与报告在 `.bench/`
 
 ## 进程 / GPU 调度优先级
 
